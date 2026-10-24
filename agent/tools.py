@@ -30,6 +30,8 @@ TOOL_CATEGORY = DEFAULT_TOOL_CATEGORIES
 # Keep the deterministic stand-in on the same configured windows, limits, and
 # rule outcomes as the real Cedar-backed guard.
 WINDOW_S = int(family_policy.BUDGET_WINDOW.total_seconds())
+RECENT_PAYEE_WINDOW_S = int(family_policy.RECENT_PAYEE_WINDOW.total_seconds())
+HOUSEHOLD_TAINT_S = int(family_policy.HOUSEHOLD_TAINT.total_seconds())
 BREAKER_WINDOW_S = int(family_policy.BREAKER_WINDOW.total_seconds())
 KNOWN_BILL_LOOKBACK_S = int(family_policy.KNOWN_BILL_LOOKBACK.total_seconds())
 KNOWN_BILL_CYCLE_S = int(family_policy.KNOWN_BILL_CYCLE.total_seconds())
@@ -37,11 +39,13 @@ LIMITS_NORMAL = {
     "day": family_policy.FAMILY_LIMITS["day"],
     "gift_card_day": family_policy.FAMILY_LIMITS["gift_card_day"],
     "new_payee_first": family_policy.FAMILY_LIMITS["new_payee_first"],
+    "recent_payees": family_policy.FAMILY_LIMITS["recent_payees"],
 }
 LIMITS_TAINTED = {
     "day": family_policy.FAMILY_LIMITS["day_flagged"],
     "gift_card_day": 0,
     "new_payee_first": 0,
+    "recent_payees": family_policy.FAMILY_LIMITS["recent_payees_flagged"],
 }
 _STATUS = {"allow": "allowed", "deny": "released", "hold": "held"}
 
@@ -73,6 +77,7 @@ class FakeGuard:
         self.outbound_wall = OutboundWall(self.secrets, self.sessions)
         self.known_payees = set(known_payees or {"power-company.example", "landlord.example"})
         self.known_payees.update(known_bills or {})
+        self._established_payees = set(self.known_payees)
         self._known_bill_history = {
             payee: [(amount, self.clock() - 30 * 24 * 3600)]
             for payee, amount in (known_bills or {}).items()
@@ -80,6 +85,7 @@ class FakeGuard:
         self.bound_person = bound_person.lower()
         self.fault: str | None = None        # set to any string to simulate "Cedar is down"
         self.events: list[dict] = []
+        self._household_taint_at: float | None = None
         self._by_request: dict[str, tuple[tuple, dict]] = {}
         self._lock = threading.Lock()         # stands in for BEGIN IMMEDIATE
 
@@ -130,11 +136,15 @@ class FakeGuard:
                     return original  # a retry gets the original answer, never counted twice
                 return {**_hold("request_id_reuse"), "decision": "deny", "needs_approval": False}
             tainted = self.sessions.is_tainted(req["session_id"])
-            lim = LIMITS_TAINTED if tainted else LIMITS_NORMAL
             now, cat = self.clock(), req["category"]
+            tainted = tainted or (
+                self._household_taint_at is not None
+                and now - self._household_taint_at <= HOUSEHOLD_TAINT_S
+            )
+            lim = LIMITS_TAINTED if tainted else LIMITS_NORMAL
             mine = [e for e in self.events if e["person"] == self.bound_person]
             live = [e for e in mine if e["decision"] == "allow" and now - e["_t"] < WINDOW_S]
-            day = sum(e["amount_cents"] for e in live) + amt
+            day = sum(e["amount_cents"] for e in live if not e.get("_known_bill"))
             gift = sum(e["amount_cents"] for e in live if e["category"] == "gift_card") + (amt if cat == "gift_card" else 0)
             denials = [e for e in mine if e["decision"] == "deny" and now - e["_t"] < BREAKER_WINDOW_S]
             # As in the real guard (authorize.KNOWN_BILL_CYCLE): a known bill is
@@ -148,12 +158,46 @@ class FakeGuard:
                 last_bill = last[0]
             known_bill = cat in family_policy.KNOWN_BILL_CATEGORIES and last_bill is not None
             new_payee = req["payee"] not in self.known_payees
+            first_paid_by_payee = {}
+            for event in mine:
+                if event["decision"] == "allow" and event["payee"] is not None:
+                    first_paid_by_payee[event["payee"]] = min(
+                        first_paid_by_payee.get(event["payee"], event["_t"]),
+                        event["_t"],
+                    )
+            payee_payments = [
+                e for e in mine
+                if e["decision"] == "allow" and e["payee"] == req["payee"]
+            ]
+            first_paid = first_paid_by_payee.get(req["payee"])
+            recent_payee = (
+                req["payee"] not in self._established_payees
+                and first_paid is not None
+                and now - first_paid <= RECENT_PAYEE_WINDOW_S
+            )
+            payee_recent_total = sum(
+                e["amount_cents"] for e in payee_payments
+                if now - e["_t"] <= RECENT_PAYEE_WINDOW_S
+            ) + amt
+            recent_payees_total = sum(
+                e["amount_cents"] for e in mine
+                if e["decision"] == "allow"
+                and e["payee"] is not None
+                and e["payee"] not in self._established_payees
+                and first_paid_by_payee.get(e["payee"]) is not None
+                and now - first_paid_by_payee[e["payee"]] <= RECENT_PAYEE_WINDOW_S
+                and now - e["_t"] <= RECENT_PAYEE_WINDOW_S
+            )
+            if new_payee or recent_payee:
+                recent_payees_total += amt
 
             fired: set[str] = set()
             # Over the day's limit: stopped for someone new (a bail wire), waits
             # for the family for someone she's paid before (family.cedar).
-            if not known_bill and day > lim["day"]:
+            if not known_bill and day + amt > lim["day"]:
                 fired.add("daily_cap" if new_payee else "daily_cap_needs_approval")
+            if (new_payee or recent_payee) and recent_payees_total > lim["recent_payees"]:
+                fired.add("recent_payee_cap")
             if cat == "gift_card":
                 if tainted:
                     fired.add("gift_card_needs_approval")
@@ -164,6 +208,8 @@ class FakeGuard:
                     fired.add("new_payee_needs_approval")
                 elif amt > lim["new_payee_first"]:
                     fired.add("new_payee_cap")
+            elif recent_payee and not tainted and payee_recent_total > lim["new_payee_first"]:
+                fired.add("new_payee_month_cap")
             if known_bill and amt * 5 > last_bill * 6:
                 fired.add("bill_increase")
             breaker_limit = family_policy.FAMILY_LIMITS[
@@ -178,14 +224,18 @@ class FakeGuard:
             decision = family_policy.RULE_OUTCOMES[rule] if rule != "ok" else "allow"
 
             event_id = len(self.events) + 1
-            self.events.append(self._event(event_id, req, _STATUS[decision], decision, rule, now))
+            event = self._event(event_id, req, _STATUS[decision], decision, rule, now)
+            event["_known_bill"] = known_bill
+            self.events.append(event)
             resp = {
                 "decision": decision, "rule": rule,
-                "totals": {"day": day, "gift_card_day": gift},
+                "totals": {"day": day + (0 if known_bill else amt),
+                           "gift_card_day": gift, "recent_payees": recent_payees_total},
                 "limits": {
                     "day": lim["day"],
                     "gift_card_day": lim["gift_card_day"],
                     "new_payee_first": lim["new_payee_first"],
+                    "recent_payees": lim["recent_payees"],
                 },
                 "needs_approval": decision == "hold", "event_id": event_id,
             }
@@ -197,7 +247,11 @@ class FakeGuard:
             return resp
 
     def inbound(self, session_id, source, content):
-        return self.inbound_wall.ingest(session_id, source, content).to_contract()
+        result = self.inbound_wall.ingest(session_id, source, content)
+        if not result.trusted:
+            with self._lock:
+                self._household_taint_at = self.clock()
+        return result.to_contract()
 
     def outbound(self, session_id, recipient, channel, content):
         return self.outbound_wall.check(session_id, recipient, channel, content)
