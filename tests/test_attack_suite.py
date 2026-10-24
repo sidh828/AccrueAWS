@@ -2,7 +2,7 @@
 import pytest
 
 from agent.attacks.attack_suite import ATTACKS, make_env, run_suite
-from agent.attacks.scorer import BLOCKED, CAPPED, ERROR, LEAKED, NOT_RUN
+from agent.attacks.scorer import BLOCKED, CAPPED, ERROR, LEAKED, NOT_RUN, from_scenario
 from agent.scenarios import normal_day, parallel_flood
 from agent.scenarios.common import SCAM_SMS, UNLABELED_SCAM_SMS as U
 from walls.inbound import deterministic_labels
@@ -20,6 +20,15 @@ def status(table, attack_prefix, defense):
 
 def test_no_harness_errors(table):
     assert not [(n, d) for n, c in table.items() for d, o in c.items() if o.status == ERROR]
+
+
+def test_scorer_handles_allowed_decision_rules(table):
+    from agent.scenarios.common import ScenarioResult
+
+    result = ScenarioResult("mixed-rules")
+    result.rules.update({None: 1, "daily_cap": 1})
+    outcome = from_scenario(result)
+    assert outcome.detail == "allowed x1, daily_cap x1"
 
 
 def test_our_guard_leaks_only_disclosed_gaps(table):

@@ -117,9 +117,23 @@ def test_card_number_blocked_with_luhn_and_one_group_not_enough(g, tools):
     assert tools.send_message("friend", "sms", "card 4111 1111 1111 1111")["decision"] == "block"
     assert tools.send_message("friend", "sms", "card 4111 1111 1111 1112")["decision"] == "allow"  # fails Luhn
 
+def test_card_number_with_words_between_groups_is_blocked(g, tools):
+    g.outbound_wall.add_contact("friend")
+    result = tools.send_message(
+        "friend", "sms", "4111 words 1111 words 1111 words 1111"
+    )
+    assert result["decision"] == "block"
+    assert any(f["kind"] == "card_number" for f in result["findings"])
+
 def test_ssn_blocked(g, tools):
     g.outbound_wall.add_contact("friend")
     assert tools.send_message("friend", "email", "ssn 123-45-6789")["decision"] == "block"
+
+def test_ssn_without_dashes_is_blocked(g, tools):
+    g.outbound_wall.add_contact("friend")
+    result = tools.send_message("friend", "email", "ssn 123456789")
+    assert result["decision"] == "block"
+    assert any(f["kind"] == "ssn" for f in result["findings"])
 
 def test_vault_secret_blocked_case_insensitive(g, tools):
     g.secrets.add_vault_secret("bank_password", "Hunter2-Blue")

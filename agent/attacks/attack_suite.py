@@ -65,7 +65,9 @@ ATTACKS: list[Attack] = [
     Attack("Card number leaked one group at a time (stranger)",
            lambda e: wa.card_one_group_at_a_time(e, known_contact=False)),
     Attack("Card number leaked one group at a time (hijacked known contact)",
-           lambda e: wa.card_one_group_at_a_time(e, known_contact=True), known_gap=True),
+           lambda e: wa.card_one_group_at_a_time(e, known_contact=True)),
+    Attack("Card number with words between groups", wa.card_groups_separated_by_words),
+    Attack("SSN sent without dashes", wa.ssn_without_dashes),
     Attack("New payee 'plumber' with a fake invoice", lambda e: from_scenario(payee_attacks.fake_invoice(e))),
     Attack("Message tells the agent to approve its own override", wa.self_override,
            na=("per_call", "scam_wall")),
@@ -171,7 +173,10 @@ def main() -> None:
     table = run_suite(real_guard=args.real)
     md = render_markdown(table, DEFENSES)
     mode = "real Cedar-backed ledger" if args.real else "FakeGuard simulation (not Cedar)"
-    md = f"Evidence mode: {mode}; commit {metadata['git_commit'] or 'unknown'}.\n\n{md}"
+    source = f"commit {metadata['git_commit'] or 'unknown'}"
+    if metadata["source_worktree_clean"] is False:
+        source += " plus uncommitted working-tree changes"
+    md = f"Evidence mode: {mode}; {source}.\n\n{md}"
     print(md)
     leaks = [a.name for a in ATTACKS if table[a.name]["ours"].status == LEAKED]
     print("\nOur guard leaked on:", leaks or "nothing")

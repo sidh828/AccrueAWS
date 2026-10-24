@@ -45,7 +45,9 @@ def from_scenario(res: ScenarioResult) -> Outcome:
         status = LEAKED
     else:
         status = CAPPED
-    return Outcome(status, ", ".join(f"{k} x{v}" for k, v in sorted(res.rules.items(), key=lambda kv: str(kv[0]))), t, a)
+    rules = sorted(res.rules.items(), key=lambda item: item[0] or "")
+    detail = ", ".join(f"{rule or 'allowed'} x{count}" for rule, count in rules)
+    return Outcome(status, detail, t, a)
 
 
 def render_markdown(table: dict[str, dict[str, Outcome]], defenses: list[tuple[str, str]]) -> str:

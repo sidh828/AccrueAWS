@@ -157,9 +157,7 @@ class SecretStore:
         return out
 
     def _scan_cards(self, text: str) -> list[Finding]:
-        """Luhn check on the cleaned digits of each run ("4111 1111...", "4-1-1-1...",
-        spelled-out digits). Token-aligned windows catch a card with extra digits
-        appended. Runs are checked separately so unrelated numbers are never glued."""
+        """Luhn-check digit groups in each uninterrupted number run."""
         out: list[Finding] = []
         whole = nfkc(text) != text  # positions would not line up: flag the whole message
         for run in digit_runs(text):

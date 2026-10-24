@@ -6,7 +6,6 @@ Precedence: block > hold > redact > allow. Any internal error returns block
 from __future__ import annotations
 
 import threading
-import time
 from typing import Callable
 
 from walls.inbound import SessionStore
@@ -47,7 +46,7 @@ class OutboundWall:
         self.contacts = {_norm(c) for c in (contacts or set())}
         self.on_alert = on_alert or (lambda event: None)
         self._sent_groups: dict[str, list[tuple[float, str]]] = {}  # session -> (time, digits)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def add_contact(self, recipient: str) -> None:
         self.contacts.add(_norm(recipient))
@@ -62,11 +61,15 @@ class OutboundWall:
             return result
 
     def _check(self, session_id: str, recipient: str, channel: str, content: str) -> dict:
+        with self._lock:
+            return self._check_locked(session_id, recipient, channel, content)
+
+    def _check_locked(self, session_id: str, recipient: str, channel: str, content: str) -> dict:
+        now = self.secrets.now()
         findings = self.secrets.scan(content)
         # Only card-sized groups count; "group 2 is 1111" keeps 1111, not the 2.
-        groups = [t.digits for run in digit_runs(content) for t in run
-                  if 4 <= len(t.digits) <= 6]
-        if self._completes_a_card(session_id, groups):
+        groups = self._card_groups(content)
+        if self._completes_a_card(session_id, groups, now):
             findings.append(Finding("card_number", 0, len(content), label="across messages"))
         kinds = {f.kind for f in findings}
         decision = "allow"
@@ -82,24 +85,37 @@ class OutboundWall:
             result["redacted_content"] = redact(content, findings)
         if decision in ("block", "hold"):
             self._alert(session_id, recipient, result)
-        else:  # it goes out: remember its digits for the next message
-            self._remember(session_id, groups)
+        else:
+            sent_content = result.get("redacted_content", content)
+            self._remember(session_id, self._card_groups(sent_content), now)
         return result
 
-    def _recent(self, session_id: str) -> list[str]:
-        now = time.time()
-        with self._lock:
-            kept = [(t, g) for t, g in self._sent_groups.get(session_id, [])
-                    if now - t < PIECES_WINDOW_SECONDS][-PIECES_REMEMBERED:]
-            self._sent_groups[session_id] = kept
-            return [g for _, g in kept]
+    @staticmethod
+    def _card_groups(content: str) -> list[str]:
+        return [token.digits for run in digit_runs(content) for token in run
+                if 4 <= len(token.digits) <= 6]
 
-    def _remember(self, session_id: str, groups: list[str]) -> None:
-        now = time.time()
+    def _recent(self, session_id: str, now: float) -> list[str]:
+        cutoff = now - PIECES_WINDOW_SECONDS
         with self._lock:
-            self._sent_groups.setdefault(session_id, []).extend((now, g) for g in groups if g)
+            recent = [
+                (sent_at, digits)
+                for sent_at, digits in self._sent_groups.get(session_id, [])
+                if sent_at >= cutoff
+            ][-PIECES_REMEMBERED:]
+            if recent:
+                self._sent_groups[session_id] = recent
+            else:
+                self._sent_groups.pop(session_id, None)
+            return [digits for _, digits in recent]
 
-    def _completes_a_card(self, session_id: str, groups: list[str]) -> bool:
+    def _remember(self, session_id: str, groups: list[str], now: float) -> None:
+        if not groups:
+            return
+        with self._lock:
+            self._sent_groups.setdefault(session_id, []).extend((now, group) for group in groups)
+
+    def _completes_a_card(self, session_id: str, groups: list[str], now: float) -> bool:
         """Whether this message's digit groups - with words between them, or
         after the groups sent before it - end a card number. Only whole
         groups, in the order they went out - never arbitrary digits glued
@@ -110,7 +126,7 @@ class OutboundWall:
         # Luhn when glued (about one in ten) are otherwise flagged.
         if not groups:
             return False
-        sequence = self._recent(session_id) + groups
+        sequence = self._recent(session_id, now) + groups
         for end in range(len(sequence) - len(groups), len(sequence)):
             digits = ""
             for start in range(end, -1, -1):
