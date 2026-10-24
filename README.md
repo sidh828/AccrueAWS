@@ -52,11 +52,17 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m guard.api --db ledger.db
 # Password-vault entries are still in memory and must be loaded at startup.
 
-# the family dashboard against a stand-in API:
+# optional stand-in dashboard/API for a demo without the real guard:
 # It prints two links: the one ending in #token=... can approve payments
 # (open it once on each device that should), the other is read-only.
 python3 dashboard/fake_api.py
 python3 dashboard/alerts.py --dry-run   # phone alerts, printed instead of sent
+
+# attack-suite comparison; --real sends agent requests through HttpGuard to a
+# local real API backed by Cedar and an isolated ledger.
+# The JSON report records the mode, Cedar version, source commit, ledger head,
+# and verification result for each real-guard attack.
+python3 -m agent.attacks.attack_suite --real --md attack-results.md --json attack-results.json
 ```
 
 ## Layout

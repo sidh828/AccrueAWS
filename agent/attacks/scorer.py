@@ -29,6 +29,7 @@ class Outcome:
     detail: str = ""
     through_cents: int = 0
     attempted_cents: int = 0
+    evidence: dict | None = None
 
     def cell(self) -> str:
         if self.status in (CAPPED, LEAKED) and self.attempted_cents:
@@ -55,5 +56,7 @@ def render_markdown(table: dict[str, dict[str, Outcome]], defenses: list[tuple[s
     return "\n".join([head, sep, *rows])
 
 
-def to_json(table: dict[str, dict[str, Outcome]]) -> str:
-    return json.dumps({n: {d: asdict(o) for d, o in cells.items()} for n, cells in table.items()}, indent=2)
+def to_json(table: dict[str, dict[str, Outcome]], metadata: dict | None = None) -> str:
+    results = {n: {d: asdict(o) for d, o in cells.items()} for n, cells in table.items()}
+    payload = {"metadata": metadata, "results": results} if metadata is not None else results
+    return json.dumps(payload, indent=2)

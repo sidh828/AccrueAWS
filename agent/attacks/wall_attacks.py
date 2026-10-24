@@ -66,9 +66,23 @@ def self_override(env: Env) -> Outcome:
 
 
 def cedar_down(env: Env) -> Outcome:
-    """Policy engine dead mid-run. Payments must hold, not slip through."""
-    env.guard.fault = "cedar killed"
+    """Policy engine unavailable mid-run. Payments must hold, not slip through."""
+    env.guard.fault = "cedar unavailable"
     res = ScenarioResult("cedar_down")
     for _ in range(3):
         res.record(12_000, env.tools.pay_bill("power-company.example", 12_000, "normal bill"))
     return from_scenario(res)
+
+
+def ledger_edited(env: Env) -> Outcome:
+    """Prove that editing a real ledger row is detected by its hash chain."""
+    tamper = getattr(env.guard, "tamper_event", None)
+    evidence = getattr(env.guard, "evidence", None)
+    if tamper is None or evidence is None:
+        return Outcome(BLOCKED, "ledger verification unavailable")
+    env.tools.pay_bill("power-company.example", 1_000, "ordinary bill")
+    tamper()
+    verification = evidence()["ledger_verification"]
+    detected = not verification["ok"] and verification["first_bad_event_id"] == 1
+    detail = f"first_bad_event_id={verification['first_bad_event_id']}"
+    return Outcome(BLOCKED if detected else LEAKED, detail)
