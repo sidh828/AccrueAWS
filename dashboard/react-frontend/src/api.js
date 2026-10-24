@@ -29,8 +29,15 @@ function getDashboardToken() {
 
 const dashboardToken = getDashboardToken();
 
+// Payment history is only the dashboard's to read, so reads carry its token.
+const NEEDS_LINK = "This screen can't show payments. Open the dashboard using its authorized link.";
+
 async function getSnapshot() {
-  const response = await fetch(`${API}/events?since=0`, { cache: 'no-store' });
+  const response = await fetch(`${API}/events?since=0`, {
+    cache: 'no-store',
+    headers: dashboardToken ? { Authorization: `Bearer ${dashboardToken}` } : {},
+  });
+  if (response.status === 401) throw new Error(NEEDS_LINK);
   if (!response.ok) throw new Error(`Couldn't load activity (HTTP ${response.status})`);
   const rows = await response.json();
   if (!Array.isArray(rows)) throw new Error('Unexpected /events response');
@@ -93,14 +100,18 @@ export function useGuardEvents() {
     async function start() {
       try {
         await refresh();
-      } catch {
-        if (!disposed) setConnection('offline');
+      } catch (reason) {
+        if (!disposed) {
+          setConnection('offline');
+          if (reason.message === NEEDS_LINK) setError(NEEDS_LINK);
+        }
       }
       if (disposed) return;
 
       // EventSource is a one-way read connection; approve/deny uses POST.
       // Fail over after the first SSE error, including a missing /stream endpoint.
-      source = new EventSource(`${API}/stream`);
+      // EventSource can't send headers, so the token rides in the URL.
+      source = new EventSource(`${API}/stream?token=${encodeURIComponent(dashboardToken)}`);
       source.onopen = () => { if (!disposed) setConnection('live'); };
       source.onmessage = (message) => {
         try { mergeEvent(JSON.parse(message.data)); } catch { /* Ignore invalid messages */ }

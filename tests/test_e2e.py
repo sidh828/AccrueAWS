@@ -105,7 +105,8 @@ def server(tmp_path):
 
 
 def get(base, path):
-    with urllib.request.urlopen(base + path, timeout=10) as r:
+    request = urllib.request.Request(base + path, headers={"Authorization": f"Bearer {TOKEN}"})
+    with urllib.request.urlopen(request, timeout=10) as r:
         return json.loads(r.read())
 
 

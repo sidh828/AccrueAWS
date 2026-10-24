@@ -61,8 +61,8 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 # Password-vault entries are still in memory and must be loaded at startup.
 
 # optional stand-in dashboard/API for a demo without the real guard:
-# It prints two links: the one ending in #token=... can approve payments
-# (open it once on each device that should), the other is read-only.
+# It prints the dashboard link, ending in #token=...: open it once on each
+# device that should see payments and approve them.
 python3 dashboard/fake_api.py
 python3 dashboard/alerts.py --dry-run   # phone alerts, printed instead of sent
 

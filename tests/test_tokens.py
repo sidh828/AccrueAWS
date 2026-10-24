@@ -209,7 +209,8 @@ def test_over_http_the_token_decides_the_chain(server):
             "category": "gift_card", "session_id": "s"}
     status, answer = post(server, body)
     assert status == 200
-    with urllib.request.urlopen(server + "/events", timeout=10) as r:
+    with urllib.request.urlopen(urllib.request.Request(
+            server + "/events", headers={"Authorization": "Bearer dash-token"}), timeout=10) as r:
         [row] = json.loads(r.read())
     assert row["chain"] == ["mom", "bills-agent", "giftcard-subagent"]
 
@@ -224,5 +225,6 @@ def test_over_http_a_forged_or_missing_token_is_refused(server):
                       lambda c: c[-1].update(day_cents=900_000))
     assert post(server, {**base, "token": forged})[0] == 401
     assert post(server, base)[0] == 401
-    with urllib.request.urlopen(server + "/events", timeout=10) as r:
+    with urllib.request.urlopen(urllib.request.Request(
+            server + "/events", headers={"Authorization": "Bearer dash-token"}), timeout=10) as r:
         assert json.loads(r.read()) == []

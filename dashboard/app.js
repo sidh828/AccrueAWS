@@ -37,11 +37,11 @@ let liveText = "Connecting…";
 let broken = false; // the last redraw threw
 let drawQueued = false;
 
-// Approving needs the dashboard's token. The server prints a link ending in
+// Seeing payments and approving both need the dashboard's token. The server prints a link ending in
 // #token=...; opening it once on a device lets that device approve. The
 // token is kept on the device and taken out of the address bar, so it never
-// shows on a shared screen or in the video. Without it the page is
-// read-only. The agent never has it.
+// shows on a shared screen or in the video. Without it the page shows
+// nothing. The agent never has it.
 const TOKEN_KEY = "accrue-dashboard-token";
 const READ_ONLY = "To approve or deny from this screen, open the dashboard link the server printed.";
 let token = takeToken();
@@ -72,7 +72,8 @@ function forgetToken() {
 // ---- data ---------------------------------------------------------------
 
 function connect() {
-  const stream = new EventSource(`${API}/stream`);
+  // EventSource can't send headers, so the token rides in the URL.
+  const stream = new EventSource(`${API}/stream?token=${encodeURIComponent(token || "")}`);
   stream.onopen = () => setLive("Live");
   stream.onmessage = (e) => upsert([JSON.parse(e.data)]);
   stream.onerror = () => {
@@ -85,12 +86,17 @@ function connect() {
 
 async function poll() {
   try {
-    const res = await fetch(`${API}/events?since=${lastId}`);
+    const res = await fetch(`${API}/events?since=${lastId}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (res.status === 401) throw new Error("no token");
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     upsert(await res.json());
     setLive("Live (checking every second)");
-  } catch {
-    setLive("Can't connect. Retrying…");
+  } catch (err) {
+    setLive(err.message === "no token"
+      ? "To see payments here, open the dashboard link the server printed."
+      : "Can't connect. Retrying…");
   }
   setTimeout(poll, 1000);
 }

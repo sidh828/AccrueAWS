@@ -8,8 +8,8 @@ ledger and Cedar.
     POST /override           dashboard only: {event_id, action: approve|deny}
     POST /replay             dashboard only: {policy, since?} -> what a draft rule
                              would have changed (guard/replay.py)
-    GET  /events?since=<id>  payments, oldest first
-    GET  /stream             the same, live, as server-sent events
+    GET  /events?since=<id>  payments, oldest first (dashboard token)
+    GET  /stream             the same, live (token in the header or ?token=)
     GET  /verify             {ok, first_bad_event_id, first_bad_override_id, head}
                              (?anchor_id=&anchor_hash= checks a head kept elsewhere)
     GET  /limits             the spending limits, normal and after a scam flag
@@ -255,6 +255,12 @@ class Handler(BaseHTTPRequestHandler):
             if not path.is_file():
                 return self._json(404, {"error": "the dashboard isn't here"})
             return self._send(200, path.read_bytes(), content_type)
+        if url.path in ("/events", "/stream") and not self._from_dashboard(
+                query if url.path == "/stream" else None):
+            # Payments are Mom's private history: only the dashboard reads them.
+            # The browser's EventSource can't send headers, so /stream also
+            # takes the token as ?token=.
+            return self._json(401, {"error": "reading payments needs the dashboard's token"})
         if url.path == "/stream":
             return self._stream()
         if url.path == "/limits":
@@ -463,9 +469,15 @@ class Handler(BaseHTTPRequestHandler):
         with self.changed:
             self.changed.notify_all()
 
-    def _from_dashboard(self):
+    def _from_dashboard(self, query=None):
+        """The dashboard's token, from the Authorization header or, where
+        `query` is given, a ?token= parameter."""
         scheme, _, sent = self.headers.get("Authorization", "").partition(" ")
-        return scheme.lower() == "bearer" and hmac.compare_digest(sent.encode(), self.token.encode())
+        if scheme.lower() != "bearer" and query:
+            sent = query.get("token", [""])[0]
+        elif scheme.lower() != "bearer":
+            return False
+        return hmac.compare_digest(sent.encode(), self.token.encode())
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -570,8 +582,8 @@ def main(argv=None):
                          people=people, demo=args.demo)
     base = f"http://{args.host}:{args.port}/"
     print(f"guard API on {base}  (ledger: {args.db})")
-    print(f"dashboard, can approve:  {base}#token={token}")
-    print(f"dashboard, read-only:    {base}")
+    print(f"dashboard:  {base}#token={token}")
+    print("(open it once on each device that should see payments and approve them)")
     if not os.environ.get("ACCRUE_LEDGER_KEY"):
         print("note: ACCRUE_LEDGER_KEY isn't set, so the ledger is hashed without a key")
     if not people and not require_token:

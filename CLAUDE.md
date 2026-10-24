@@ -102,7 +102,9 @@ Response (`totals` include this request; `limits` are the column that applied):
   from the token and the request's is ignored; forged, altered or expired is
   a 401. `ACCRUE_REQUIRE_TOKENS=1` refuses requests without one.
 - `GET /events?since=<id>` and `GET /stream` (server-sent events): payments
-  ordered by `event_id`. No token needed (see #26 for the privacy question).
+  ordered by `event_id`. Dashboard only: they need the dashboard token, in
+  `Authorization: Bearer` or, for `/stream` (EventSource can't send headers),
+  as `?token=`; otherwise 401. `/verify` and `/limits` stay open.
 - `POST /override {event_id, action: approve|deny}`: dashboard only. It needs
   `Authorization: Bearer <dashboard token>` and a JSON body, or it gets 401
   or 415. The guard reads the token from `ACCRUE_DASHBOARD_TOKEN`, or makes
