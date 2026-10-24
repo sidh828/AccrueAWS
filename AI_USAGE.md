@@ -73,3 +73,30 @@ line sat at the right edge, and the watcher's output was lost when piped.
 
 **Human decisions:** none in this block. The contract questions it raised
 are for the team.
+
+## Sat Oct 24, 12:15 to 12:45 PM: dashboard review fixes (Siddh, with Claude Code)
+
+**Asked:** Siddh had Claude Code run an AI code review of the dashboard (the
+Shipwright code-reviewer agent), then chose which findings to fix: six of
+the eight.
+
+**What it did:** fixed those six in one PR.
+
+- Held payments stay in "Needs your OK" after midnight.
+- Names the agent chooses can't break the page.
+- Redraws are batched, so Approve/Deny clicks aren't lost.
+- Failed phone alerts are retried, and floods are summed up.
+- The stand-in server has limits and timeouts.
+- New tests cover all of it.
+
+**How we checked:** we confirmed the review's top finding by running it (a
+cross-site POST approved a held payment on the stand-in). After the fixes,
+66 tests pass, and 8 of the new tests fail on the old code. We also rendered
+the dashboard in headless Firefox with a payment held since yesterday and a
+hostile row (tool `constructor`, rule `toString`, null fields).
+
+**Rejected:** the review's remaining findings were deferred, not rejected.
+`/override` has no login, and approvals don't reach other tabs. Both need
+team decisions in issue #1.
+
+**Human decisions:** Siddh picked which findings to fix.
