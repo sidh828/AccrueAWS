@@ -2,7 +2,7 @@
 // idea a history exists — authorize.py computes that number as
 // (everything this home spent in the last 24 hours) + (the request in
 // front of it) before Cedar is ever called. See PRIMER.md §1.4-1.5 for why Cedar
-// itself can't do that addition.
+// itself can't do that addition. Money is integer cents: 1000000 is $10,000.
 
 permit (
     principal,
@@ -15,5 +15,5 @@ forbid (
     action == Action::"transfer",
     resource
 ) when {
-    context.cumulative_cost > 10000
+    context.cumulative_cost > 1000000
 };

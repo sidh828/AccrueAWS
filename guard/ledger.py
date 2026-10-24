@@ -20,8 +20,10 @@ CREATE TABLE IF NOT EXISTS events (
     home        TEXT NOT NULL,
     action      TEXT NOT NULL,
     resource    TEXT NOT NULL,
-    cost_usd    REAL,
-    decision    TEXT NOT NULL CHECK (decision IN ('ALLOW', 'DENY'))
+    amount_cents INTEGER NOT NULL
+                CHECK (typeof(amount_cents) = 'integer' AND amount_cents >= 0),
+    decision    TEXT NOT NULL CHECK (decision IN ('ALLOW', 'DENY')),
+    request_id  TEXT UNIQUE
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_session_id ON events (session_id);
@@ -115,36 +117,50 @@ def connect(db_path="ledger.db"):
     return conn
 
 
-def insert_event(conn, timestamp, session_id, action, resource, cost_usd, decision,
-                  scope_id=None):
+def insert_event(conn, timestamp, session_id, action, resource, amount_cents, decision,
+                  scope_id=None, request_id=None):
     """Append one event and return its database id.
 
     The caller owns the transaction. This is important for authorization:
     reading the aggregates and recording the decision must commit atomically.
 
-    `scope_id` is the durable cross-session identity this event rolls up
-    under (see aggregates.cumulative_cost_for_scope). Defaults to
-    session_id, so a caller with no separate scope concept yet just scopes
-    to itself - existing single-session behavior is unchanged.
+    `amount_cents` is an integer number of cents; the schema rejects
+    anything else. `scope_id` is the durable cross-session identity this
+    event rolls up under (see aggregates.cumulative_cost_for_scope).
+    Defaults to session_id, so a caller with no separate scope concept yet
+    just scopes to itself - existing single-session behavior is unchanged.
+    `request_id`, when given, is unique across the ledger (see
+    find_by_request_id).
     """
     if scope_id is None:
         scope_id = session_id
     scope_id = normalize_scope(scope_id)
     cursor = conn.execute(
         "INSERT INTO events "
-        "(timestamp, session_id, scope_id, home, action, resource, cost_usd, decision) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "(timestamp, session_id, scope_id, home, action, resource, amount_cents, "
+        "decision, request_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (timestamp, session_id, scope_id, home_scope(scope_id), action, resource,
-         cost_usd, decision),
+         amount_cents, decision, request_id),
     )
     return cursor.lastrowid
+
+
+def find_by_request_id(conn, request_id):
+    """The event already logged for this request_id, as
+    (id, session_id, scope_id, resource, amount_cents, decision), or None."""
+    return conn.execute(
+        "SELECT id, session_id, scope_id, resource, amount_cents, decision "
+        "FROM events WHERE request_id = ?",
+        (request_id,),
+    ).fetchone()
 
 
 def list_events(conn, session_id=None, scope_id=None):
     """Return events in append order, optionally filtered by session and/or
     scope."""
     query = ("SELECT id, timestamp, session_id, scope_id, action, resource, "
-             "cost_usd, decision FROM events")
+             "amount_cents, decision FROM events")
     conditions = []
     params = []
     if session_id is not None:

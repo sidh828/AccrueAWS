@@ -32,7 +32,7 @@ def is_tripped(conn, scope_id):
         return False
 
     # column order from aggregates.last_event_for_scope's SELECT:
-    # id, timestamp, session_id, scope_id, action, resource, cost_usd, decision
+    # id, timestamp, session_id, scope_id, action, resource, amount_cents, decision
     deny_id, _, _, _, _, _, _, decision = last
     if decision != "DENY":
         return False

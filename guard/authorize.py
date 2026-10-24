@@ -12,7 +12,6 @@ exists to close. See PRIMER.md §1.4.
 """
 
 import json
-import math
 import os
 import subprocess
 import tempfile
@@ -38,6 +37,10 @@ CEDAR_BIN = os.environ.get("ACCRUE_CEDAR_BIN", "cedar")
 # timeout blocked every other request until it got "database is locked".
 CEDAR_TIMEOUT_SECONDS = 2.0
 
+# $10 billion. Anything bigger is a bug or an attack, and the running total
+# has to stay well inside Cedar's 64-bit Long.
+MAX_AMOUNT_CENTS = 10**12
+
 
 def _entity_uid(entity_type, entity_id):
     """Build a Cedar entity UID like Account::"acct-1234" from an
@@ -58,8 +61,9 @@ def _entity_uid(entity_type, entity_id):
     return f'{entity_type}::"{escaped}"'
 
 
-def _ask_cedar(principal, action, resource, context):
-    """Shell out to the `cedar` CLI and return "ALLOW" or "DENY".
+def _ask_cedar(principal, action, resource, context, policy_path=None):
+    """Shell out to the `cedar` CLI and return "ALLOW" or "DENY", under
+    `policy_path` (default: POLICY_PATH).
 
     Cedar does not abort when a policy errors while being evaluated (e.g. a
     context attribute typo'd in a `when` clause, or a request built with a
@@ -85,7 +89,7 @@ def _ask_cedar(principal, action, resource, context):
                 [
                     CEDAR_BIN,
                     "authorize",
-                    "--policies", str(POLICY_PATH),
+                    "--policies", str(policy_path or POLICY_PATH),
                     "--entities", str(entities_path),
                     "--principal", principal,
                     "--action", action,
@@ -119,7 +123,8 @@ def _ask_cedar(principal, action, resource, context):
         return decision
 
 
-def authorize_transfer(conn, session_id, resource, amount_usd, scope_id=None):
+def authorize_transfer(conn, session_id, resource, amount_cents, scope_id=None,
+                       request_id=None, policy_path=None):
     """Ask "can this transfer happen?", accounting for everything this
     scope has already spent - across every session under it, not just this
     one. Returns "ALLOW" or "DENY" and logs the attempt either way — only
@@ -143,16 +148,31 @@ def authorize_transfer(conn, session_id, resource, amount_usd, scope_id=None):
     integrator, not the agent, sets the home segment; an agent that can
     choose its own home can still get a fresh budget per home.
 
-    `amount_usd` must be a finite, non-negative number. A negative amount
-    would be ALLOWed (it only lowers prospective_total) and then logged as
-    an ALLOW row that subtracts from every future cumulative total - a
-    -$50,000 "transfer" buys $50,000 of extra headroom. That's malformed
-    input, not a decision, so it raises rather than returning DENY.
+    `amount_cents` must be a non-negative int, at most MAX_AMOUNT_CENTS.
+    Money is integer cents everywhere (CLAUDE.md), so a float, a bool or a
+    string is malformed input, not a decision: it raises rather than
+    returning DENY, and nothing is logged. A negative amount would be
+    ALLOWed (it only lowers prospective_total) and then logged as an ALLOW
+    row that subtracts from every future total - a -$50,000 "transfer"
+    buys $50,000 of extra headroom.
+
+    `request_id` makes a retry safe. If an event with this request_id is
+    already in the ledger, its decision is returned and nothing new is
+    logged, so an agent that times out and asks again isn't counted (or
+    paid) twice. Reusing a request_id for a different request raises.
+
+    `policy_path` is the Cedar policy to decide under (default:
+    POLICY_PATH), so a draft policy can be checked beside the live one.
     """
-    if not math.isfinite(amount_usd) or amount_usd < 0:
+    # type() rather than isinstance(): bool is a subclass of int, and True
+    # is not one cent.
+    if type(amount_cents) is not int or not 0 <= amount_cents <= MAX_AMOUNT_CENTS:
         raise ValueError(
-            f"amount_usd must be a finite, non-negative number, got {amount_usd!r}"
+            "amount_cents must be an int between 0 and "
+            f"{MAX_AMOUNT_CENTS}, got {amount_cents!r}"
         )
+    if request_id is not None and (type(request_id) is not str or not request_id):
+        raise ValueError(f"request_id must be a non-empty string, got {request_id!r}")
 
     # Built before the transaction opens, so a malformed id raises without
     # logging anything - same as a bad amount.
@@ -177,6 +197,22 @@ def authorize_transfer(conn, session_id, resource, amount_usd, scope_id=None):
 
     conn.execute("BEGIN IMMEDIATE")
     try:
+        # Checked inside the lock, so two copies of one request racing each
+        # other can't both miss the first one's row.
+        if request_id is not None:
+            prior = ledger.find_by_request_id(conn, request_id)
+            if prior is not None:
+                _, p_session, p_scope, p_resource, p_amount, p_decision = prior
+                if (p_session, p_scope, p_resource, p_amount) != (
+                    session_id, ledger.normalize_scope(scope_id), resource, amount_cents
+                ):
+                    raise ValueError(
+                        f"request_id {request_id!r} was already used for a "
+                        "different request"
+                    )
+                conn.rollback()
+                return p_decision
+
         now = datetime.now(timezone.utc)
         timestamp = ledger.utc_timestamp(now)
 
@@ -187,8 +223,8 @@ def authorize_transfer(conn, session_id, resource, amount_usd, scope_id=None):
         # against the home resets it.
         if breaker.is_tripped(conn, home):
             ledger.insert_event(
-                conn, timestamp, session_id, "transfer", resource, amount_usd,
-                "DENY", scope_id=scope_id,
+                conn, timestamp, session_id, "transfer", resource, amount_cents,
+                "DENY", scope_id=scope_id, request_id=request_id,
             )
             conn.commit()
             return "DENY"
@@ -196,28 +232,20 @@ def authorize_transfer(conn, session_id, resource, amount_usd, scope_id=None):
         already_spent = aggregates.cumulative_cost_for_scope(
             conn, home, since=ledger.utc_timestamp(now - BUDGET_WINDOW)
         )
-        prospective_total = already_spent + amount_usd
 
+        # Integer cents in, integer cents to Cedar: its JSON has only Long
+        # integers, so there's no rounding left to get wrong.
         decision = _ask_cedar(
             principal,
             'Action::"transfer"',
             account,
-            # Cedar's JSON format has no float type - only Long integers -
-            # so `cumulative_cost` (a REAL column, always a float in Python)
-            # has to be rounded to whole dollars before it crosses the CLI
-            # boundary, or the request is rejected outright as malformed.
-            # Rounded *up*, never to nearest: round() turned 10000.4 into
-            # 10000, which passes `> 10000`. Snapping to cents first keeps
-            # float drift (100,000 x $0.10 sums to 10000.000000018848) from
-            # being rounded up into a DENY for a total that's exactly at
-            # the cap. The cost: an overage under half a cent (10000.004)
-            # still snaps back to 10000 and is ALLOWed.
-            {"cumulative_cost": math.ceil(round(prospective_total, 2))},
+            {"cumulative_cost": already_spent + amount_cents},
+            policy_path=policy_path,
         )
 
         ledger.insert_event(
-            conn, timestamp, session_id, "transfer", resource, amount_usd,
-            decision, scope_id=scope_id,
+            conn, timestamp, session_id, "transfer", resource, amount_cents,
+            decision, scope_id=scope_id, request_id=request_id,
         )
         conn.commit()
         return decision

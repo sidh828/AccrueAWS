@@ -12,7 +12,7 @@ from .ledger import home_scope, normalize_scope
 
 def cumulative_cost(conn, session_id):
     row = conn.execute(
-        "SELECT COALESCE(SUM(cost_usd), 0) FROM events "
+        "SELECT COALESCE(SUM(amount_cents), 0) FROM events "
         "WHERE session_id = ? AND decision = 'ALLOW'",
         (session_id,),
     ).fetchone()
@@ -83,7 +83,7 @@ def cumulative_cost_for_scope(conn, scope_id, since=None):
     strings.
     """
     where, params = _scope_filter(normalize_scope(scope_id))
-    query = ("SELECT COALESCE(SUM(cost_usd), 0) FROM events "
+    query = ("SELECT COALESCE(SUM(amount_cents), 0) FROM events "
              f"WHERE {where} AND decision = 'ALLOW'")
     if since is not None:
         query += " AND timestamp >= ?"
@@ -103,7 +103,7 @@ def last_event_for_scope(conn, scope_id):
     where, params = _scope_filter(normalize_scope(scope_id))
     return conn.execute(
         "SELECT id, timestamp, session_id, scope_id, action, resource, "
-        f"cost_usd, decision FROM events WHERE {where} "
+        f"amount_cents, decision FROM events WHERE {where} "
         "ORDER BY id DESC LIMIT 1",
         params,
     ).fetchone()
