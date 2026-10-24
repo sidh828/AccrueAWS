@@ -16,6 +16,8 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 
+from . import explain
+
 # `home` is the first segment of scope_id (see home_scope), stored so the
 # budget and breaker queries in aggregates.py are an indexed equality
 # lookup instead of a scan of every row ever logged. (home, timestamp)
@@ -332,7 +334,7 @@ def _contract_shape(event):
         "category": event["category"],
         "decision": decision.lower(),
         "rule": event["rule"],
-        "explanation": None,
+        "explanation": explain.explain(event),
         "flagged": decision != "ALLOW",
         "row_hash": event["row_hash"],
         "resolves": event["resolves"],
@@ -360,7 +362,8 @@ def contract_rows(conn, since=0):
     - `known_bill`: the guard recognized this as a known bill (rent or a
       utility within its usual amount), which the day's total leaves out.
 
-    `explanation` is None until explain.py lands.
+    `explanation` is guard.explain's plain-English sentence for the
+    decision, worked out from the logged context when the row is read.
     """
     rows = conn.execute(
         f"SELECT {', '.join(_ROW_COLUMNS)} FROM events WHERE id > ? ORDER BY id",

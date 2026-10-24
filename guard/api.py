@@ -119,7 +119,8 @@ def payment_view(conn, event_id):
     if row is not None:
         settled = ledger.contract_row(conn, row[0])
         view.update(decision=settled["decision"], status=settled["status"],
-                    rule=settled["rule"], resolved_by=settled["event_id"])
+                    rule=settled["rule"], explanation=settled["explanation"],
+                    resolved_by=settled["event_id"])
     return view
 
 
