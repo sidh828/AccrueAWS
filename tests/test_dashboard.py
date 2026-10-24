@@ -21,11 +21,12 @@ CONTRACT_FIELDS = {
 }
 DECISION_STATUS = {("allow", "allowed"), ("deny", "released"), ("hold", "held")}
 GIFT_CARD_STOPPED = fake_api.SCRIPT[2]
+TOKEN = "dashboard-test-token"
 
 
 @contextlib.contextmanager
 def serve(guard, **kwargs):
-    server = fake_api.make_server(guard, port=0, **kwargs)
+    server = fake_api.make_server(guard, TOKEN, port=0, **kwargs)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         yield f"http://127.0.0.1:{server.server_address[1]}"
@@ -52,11 +53,21 @@ def get(url):
         return json.load(res)
 
 
-def post(url, body):
-    request = urllib.request.Request(
-        url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+def post(url, body, token=TOKEN, content_type="application/json"):
+    headers = {"Content-Type": content_type}
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers)
     with urllib.request.urlopen(request) as res:
         return json.load(res)
+
+
+def first_held(api):
+    return next(r["event_id"] for r in get(f"{api}/events?since=0") if r["status"] == "held")
+
+
+def status_of(api, event_id):
+    return next(r["status"] for r in get(f"{api}/events?since=0") if r["event_id"] == event_id)
 
 
 def read_events(res, count):
@@ -128,6 +139,35 @@ def test_a_malformed_last_event_id_replays_from_the_start(api):
 
 # ---- hostile or odd clients -------------------------------------------------
 
+def test_approving_needs_the_dashboard_token(api):
+    held = first_held(api)
+    for token in [None, "", "wrong-token", TOKEN.upper(), TOKEN + "x"]:
+        with pytest.raises(urllib.error.HTTPError) as err:
+            post(f"{api}/override", {"event_id": held, "action": "approve"}, token=token)
+        assert err.value.code == 401
+        err.value.close()
+    assert status_of(api, held) == "held"
+
+
+def test_a_cross_site_text_post_cannot_approve(api):
+    # A web page can send a text/plain POST to any address without a CORS
+    # preflight. That's how the review approved a payment from a foreign
+    # origin; now it's refused, with or without the token.
+    held = first_held(api)
+    for token in [None, TOKEN]:
+        with pytest.raises(urllib.error.HTTPError) as err:
+            post(f"{api}/override", {"event_id": held, "action": "approve"},
+                 token=token, content_type="text/plain")
+        assert err.value.code == 415
+        err.value.close()
+    assert status_of(api, held) == "held"
+
+
+def test_the_stand_in_needs_a_token_to_start():
+    with pytest.raises(ValueError):
+        fake_api.make_server(fake_api.FakeGuard(), "", port=0)
+
+
 def test_only_the_dashboard_files_are_served(api):
     for path in ["/", "/index.html", "/app.js"]:
         with urllib.request.urlopen(api + path) as res:
@@ -142,9 +182,13 @@ def test_only_the_dashboard_files_are_served(api):
 def test_an_oversized_override_body_is_refused_unread(api):
     conn = http.client.HTTPConnection(urlparse(api).netloc, timeout=5)
     conn.putrequest("POST", "/override")
+    conn.putheader("Content-Type", "application/json")
+    conn.putheader("Authorization", f"Bearer {TOKEN}")
     conn.putheader("Content-Length", str(10**9))  # declared, never sent
     conn.endheaders()
-    assert conn.getresponse().status == 413
+    res = conn.getresponse()
+    assert res.status == 413
+    res.close()
     conn.close()
 
 
@@ -237,3 +281,9 @@ def test_a_row_it_cannot_read_is_skipped_not_fatal(monkeypatch, capsys):
     assert [a["title"] for a in sent] == ["Stopped"]
     assert watcher.since == 3
     assert capsys.readouterr().out.count("skipping a row") == 3
+
+
+def test_alerts_refuse_a_link_that_can_approve():
+    # Alerts go through ntfy.sh, readable by anyone who knows the topic.
+    with pytest.raises(SystemExit):
+        alerts.main(["--dry-run", "--open", f"http://127.0.0.1:8001/#token={TOKEN}"])

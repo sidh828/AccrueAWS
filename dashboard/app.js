@@ -32,6 +32,38 @@ let liveText = "Connecting…";
 let broken = false; // the last redraw threw
 let drawQueued = false;
 
+// Approving needs the dashboard's token. The server prints a link ending in
+// #token=...; opening it once on a device lets that device approve. The
+// token is kept on the device and taken out of the address bar, so it never
+// shows on a shared screen or in the video. Without it the page is
+// read-only. The agent never has it.
+const TOKEN_KEY = "accrue-dashboard-token";
+const READ_ONLY = "To approve or deny from this screen, open the dashboard link the server printed.";
+let token = takeToken();
+
+function takeToken() {
+  const fromLink = new URLSearchParams(location.hash.slice(1)).get("token");
+  if (fromLink) {
+    history.replaceState(null, "", location.pathname + location.search);
+    try {
+      localStorage.setItem(TOKEN_KEY, fromLink);
+    } catch {}
+    return fromLink;
+  }
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function forgetToken() {
+  token = null;
+  try {
+    localStorage.removeItem(TOKEN_KEY);
+  } catch {}
+}
+
 // ---- data ---------------------------------------------------------------
 
 function connect() {
@@ -73,16 +105,17 @@ async function override(row, action) {
   try {
     const res = await fetch(`${API}/override`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify({ event_id: row.event_id, action }),
     });
+    if (res.status === 401) forgetToken(); // a stale or wrong token: back to read-only
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     // A changed old row doesn't come back through /events?since, so take
     // it from the response when the API returns it.
     const changed = await res.json();
     if (changed && changed.event_id === row.event_id) rows.set(row.event_id, changed);
   } catch (err) {
-    alert(`That didn't go through (${err.message}). Please try again.`);
+    alert(token ? `That didn't go through (${err.message}). Please try again.` : READ_ONLY);
   } finally {
     busy.delete(row.event_id);
     draw();
@@ -206,17 +239,23 @@ function renderBar(segments) {
 function renderNeedsOk(waiting) {
   const ids = new Set(waiting.map((r) => r.event_id));
   for (const id of cards.keys()) if (!ids.has(id)) cards.delete(id);
+  const canAct = Boolean(token);
   const nodes = waiting.map((r) => {
     const isBusy = busy.has(r.event_id);
     const card = cards.get(r.event_id);
-    if (card && card.row === r && card.busy === isBusy) return card.node;
+    if (card && card.row === r && card.busy === isBusy && card.canAct === canAct) return card.node;
+    const actions = canAct
+      ? [
+          el("button", { disabled: isBusy, onclick: () => override(r, "approve") }, "Approve"),
+          el("button", { disabled: isBusy, onclick: () => override(r, "deny") }, "Deny"),
+        ]
+      : [el("p", { className: "read-only" }, READ_ONLY)];
     const node = el("div", { className: "card" },
       el("p", { className: "what" }, what(r)),
       el("p", {}, `${why(r)}. Asked by ${who(r)}.`),
-      el("button", { disabled: isBusy, onclick: () => override(r, "approve") }, "Approve"),
-      el("button", { disabled: isBusy, onclick: () => override(r, "deny") }, "Deny"),
+      ...actions,
     );
-    cards.set(r.event_id, { row: r, busy: isBusy, node });
+    cards.set(r.event_id, { row: r, busy: isBusy, canAct, node });
     return node;
   });
   const box = document.getElementById("needs-ok");
