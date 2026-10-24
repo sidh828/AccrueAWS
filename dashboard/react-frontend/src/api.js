@@ -199,3 +199,45 @@ export function useGuardEvents() {
   const events = Object.values(rowsById).sort((a, b) => a.event_id - b.event_id);
   return {events, connection, error, busyId, override, runDemo, demoBusy,canRunDemo: Boolean(dashboardToken), limits };
 }
+
+const ANCHOR_KEY = 'accrue_record_anchor';
+
+// Checks the guard's record with GET /verify every few seconds and after new
+// activity. The last fingerprint (head) that checked out is kept in this tab
+// and sent back as the anchor: rewriting the history and recomputing every
+// fingerprint after it still won't match what this screen already saw.
+// Per tab (sessionStorage), so a guard restarted with a fresh record for the
+// demo isn't reported as tampered in a new tab.
+export function useVerify(activityKey) {
+  const [result, setResult] = useState(null);
+  const [checkedAt, setCheckedAt] = useState(null);
+
+  useEffect(() => {
+    let disposed = false;
+    async function check() {
+      let anchor = null;
+      try { anchor = JSON.parse(sessionStorage.getItem(ANCHOR_KEY) || 'null'); } catch { /* none */ }
+      const query = anchor && Number.isSafeInteger(anchor.event_id) && typeof anchor.row_hash === 'string'
+        ? `?anchor_id=${anchor.event_id}&anchor_hash=${encodeURIComponent(anchor.row_hash)}`
+        : '';
+      try {
+        const response = await fetch(`${API}/verify${query}`, { cache: 'no-store' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const body = await response.json();
+        if (disposed) return;
+        setResult(body);
+        setCheckedAt(new Date());
+        if (body.ok && body.head) {
+          try { sessionStorage.setItem(ANCHOR_KEY, JSON.stringify(body.head)); } catch { /* best effort */ }
+        }
+      } catch {
+        if (!disposed) setResult(null);
+      }
+    }
+    check();
+    const timer = window.setInterval(check, 5000);
+    return () => { disposed = true; window.clearInterval(timer); };
+  }, [activityKey]);
+
+  return { result, checkedAt };
+}

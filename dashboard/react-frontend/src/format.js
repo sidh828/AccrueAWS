@@ -105,3 +105,28 @@ export function asPercent(numeratorCents, denominatorCents) {
   // Used only for CSS presentation; it is NOT monetary calculation.
   return Math.max(0, Math.min(100, (numeratorCents / denominatorCents) * 100));
 }
+
+// What the proof panel says about a GET /verify result. Plain words on
+// screen: "record" and "fingerprint", never "ledger" or "hash chain".
+export function proofFrom(result) {
+  if (!result || typeof result.ok !== 'boolean') {
+    return { state: 'unknown', title: 'Not checked yet', detail: 'Waiting for the guard to check its record.' };
+  }
+  if (!result.ok) {
+    const bad = result.first_bad_event_id ?? result.first_bad_override_id;
+    const which = result.first_bad_event_id != null ? 'Payment' : 'Approval';
+    return {
+      state: 'broken',
+      title: 'The record was changed',
+      detail: `${which} record #${bad} doesn't match what was written. Someone edited the history.`,
+    };
+  }
+  const head = result.head;
+  if (!head) return { state: 'ok', title: 'Record checks out', detail: 'No payments recorded yet.' };
+  return {
+    state: 'ok',
+    title: 'Every record checks out',
+    detail: `Checked every payment through #${head.event_id}.`,
+    fingerprint: String(head.row_hash || '').slice(0, 12),
+  };
+}
