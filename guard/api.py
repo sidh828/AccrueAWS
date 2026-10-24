@@ -6,6 +6,8 @@ ledger and Cedar.
     POST /inbound            agent -> walls: {session_id, source, content}
     POST /outbound           agent -> walls: {session_id, recipient, channel, content}
     POST /override           dashboard only: {event_id, action: approve|deny}
+    POST /replay             dashboard only: {policy, since?} -> what a draft rule
+                             would have changed (guard/replay.py)
     GET  /events?since=<id>  payments, oldest first
     GET  /stream             the same, live, as server-sent events
     GET  /verify             {ok, first_bad_event_id, first_bad_override_id, head}
@@ -61,7 +63,7 @@ from walls.outbound import OutboundWall
 from walls.secrets import SecretStore
 from walls.storage import WallStateStore
 
-from . import authorize, ledger, tokens
+from . import authorize, ledger, replay, tokens
 
 DASHBOARD = Path(__file__).parent.parent / "dashboard"
 STATIC = {
@@ -69,7 +71,7 @@ STATIC = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
 }
-MAX_BODY = 10_000  # bytes; an /authorize body is a few hundred
+MAX_BODY = 64_000  # bytes; /authorize is a few hundred, a /replay draft a whole policy
 MAX_STREAMS = 50  # live /stream connections at once
 TIMEOUT = 30  # seconds before a stalled connection is dropped
 STREAM_POLL = 1.0  # seconds between ledger checks when nothing woke a stream
@@ -220,14 +222,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/authorize", "/override", "/inbound", "/outbound"):
+        if path not in ("/authorize", "/override", "/inbound", "/outbound", "/replay"):
             return self._json(404, {"error": "not found"})
         # JSON only: a web page can send a text/plain POST anywhere without
         # asking first. A JSON body makes the browser ask (CORS) first.
         if self.headers.get_content_type() != "application/json":
             return self._json(415, {"error": "the body must be JSON"})
-        if path == "/override" and not self._from_dashboard():
-            return self._json(401, {"error": "approving needs the dashboard's token"})
+        if path in ("/override", "/replay") and not self._from_dashboard():
+            return self._json(401, {"error": f"{path} needs the dashboard's token"})
         body = self._body()
         if body is None:
             return
@@ -237,6 +239,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._inbound(body)
         if path == "/outbound":
             return self._outbound(body)
+        if path == "/replay":
+            return self._replay(body)
         return self._override(body)
 
     def _authorize(self, body):
@@ -260,6 +264,18 @@ class Handler(BaseHTTPRequestHandler):
                                              "content} as strings"})
         self._json(200, self.outbound_wall.check(body["session_id"], body["recipient"],
                                                  body["channel"], body["content"]))
+
+    def _replay(self, body):
+        policy, since = body.get("policy"), body.get("since")
+        if not isinstance(policy, str) or not policy.strip() or (
+                since is not None and not isinstance(since, str)):
+            return self._json(400, {"error": "expected {policy: cedar text, since?: timestamp}"})
+        with self._ledger() as conn:
+            try:
+                result = replay.replay(conn, policy, since=since)
+            except replay.DraftError as err:
+                return self._json(400, {"error": f"the draft rule isn't valid: {err}"})
+        self._json(200, result)
 
     def _override(self, body):
         event_id, action = body.get("event_id"), body.get("action")
