@@ -13,14 +13,30 @@ exists to close. See PRIMER.md §1.4.
 
 import json
 import math
+import os
 import subprocess
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import aggregates, breaker, ledger
 
 POLICY_PATH = Path(__file__).parent / "policies" / "budget.cedar"
+
+# Spending older than this no longer counts toward the budget. Rolling, not
+# calendar: with a midnight reset, a full budget at 11:59 PM and another at
+# 12:01 AM would both fit. Without any window, a home that spent its budget
+# once was locked out forever.
+BUDGET_WINDOW = timedelta(hours=24)
+
+# The Cedar CLI to run. Overridable so a demo or a test can point it at a
+# binary that hangs or is missing and show the guard failing closed.
+CEDAR_BIN = os.environ.get("ACCRUE_CEDAR_BIN", "cedar")
+
+# A clean Cedar call takes a few milliseconds. The call runs while
+# authorize_transfer holds the ledger's write lock, so a hung Cedar with no
+# timeout blocked every other request until it got "database is locked".
+CEDAR_TIMEOUT_SECONDS = 2.0
 
 
 def _entity_uid(entity_type, entity_id):
@@ -64,20 +80,29 @@ def _ask_cedar(principal, action, resource, context):
         context_path.write_text(json.dumps(context))
         entities_path.write_text("[]")
 
-        result = subprocess.run(
-            [
-                "cedar",
-                "authorize",
-                "--policies", str(POLICY_PATH),
-                "--entities", str(entities_path),
-                "--principal", principal,
-                "--action", action,
-                "--resource", resource,
-                "--context", str(context_path),
-            ],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                [
+                    CEDAR_BIN,
+                    "authorize",
+                    "--policies", str(POLICY_PATH),
+                    "--entities", str(entities_path),
+                    "--principal", principal,
+                    "--action", action,
+                    "--resource", resource,
+                    "--context", str(context_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=CEDAR_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            # run() has already killed the process. Raising rolls back
+            # authorize_transfer's transaction and releases the lock;
+            # nothing is logged and nothing is allowed.
+            raise RuntimeError(
+                f"cedar authorize timed out after {CEDAR_TIMEOUT_SECONDS}s"
+            ) from None
         # The CLI exits 0 for ALLOW and 2 for DENY - both are real decisions.
         # Anything else (bad policy file, malformed context, ...) is a tool
         # failure and must not be silently treated as a DENY decision.
@@ -107,6 +132,9 @@ def authorize_transfer(conn, session_id, resource, amount_usd, scope_id=None):
     exactly as before - a lone session is just a scope of one. A session_id
     containing "/" can't be used that way (see below), so pass scope_id
     explicitly for those.
+
+    The budget covers what the home spent in the last BUDGET_WINDOW. The
+    breaker has no window: once tripped, it stays tripped until an override.
 
     The budget and the breaker are enforced at the scope's *home* - its
     first path segment - not at the full path: "agent-a/task-x" and
@@ -149,7 +177,8 @@ def authorize_transfer(conn, session_id, resource, amount_usd, scope_id=None):
 
     conn.execute("BEGIN IMMEDIATE")
     try:
-        timestamp = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
+        timestamp = ledger.utc_timestamp(now)
 
         # A tripped home doesn't get to ask again, no matter how small the
         # amount, how much cumulative-cost headroom remains, or which task
@@ -164,7 +193,9 @@ def authorize_transfer(conn, session_id, resource, amount_usd, scope_id=None):
             conn.commit()
             return "DENY"
 
-        already_spent = aggregates.cumulative_cost_for_scope(conn, home)
+        already_spent = aggregates.cumulative_cost_for_scope(
+            conn, home, since=ledger.utc_timestamp(now - BUDGET_WINDOW)
+        )
         prospective_total = already_spent + amount_usd
 
         decision = _ask_cedar(

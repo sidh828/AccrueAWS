@@ -3,7 +3,8 @@ the thing that actually keeps score, and that it fails closed rather than
 open when Cedar can't be trusted.
 """
 
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -140,6 +141,44 @@ def test_other_homes_are_unaffected(conn):
     ) == "ALLOW"
 
 
+def test_scope_names_are_case_insensitive(conn):
+    """Regression test: "Mom" and "mom" were two budgets (exact match) that
+    still leaked into each other (SQLite's LIKE ignores case), so the same
+    person got $10,000 per spelling. Scopes are lowercased on the way in
+    and out now: one budget, one breaker, and an override logged under any
+    spelling resets it."""
+    assert authorize.authorize_transfer(conn, "s1", "acct-1234", 6000, scope_id="Mom") == "ALLOW"
+    assert authorize.authorize_transfer(
+        conn, "s2", "acct-1234", 6000, scope_id="MOM/bills"
+    ) == "DENY"
+    assert authorize.authorize_transfer(conn, "s3", "acct-1234", 1, scope_id="mom") == "DENY"
+
+    ledger.insert_override(
+        conn, datetime.now(timezone.utc).isoformat(), "MoM", "sid",
+        "test: an override under another spelling still resets the breaker",
+    )
+    conn.commit()
+    assert authorize.authorize_transfer(conn, "s3", "acct-1234", 1, scope_id="mom") == "ALLOW"
+
+
+def test_budget_counts_only_the_last_24_hours(conn):
+    """Regression test: authorize_transfer never passed a window, so the
+    budget was lifetime - $9,999 spent a year ago still blocked $2 today.
+    Only the last authorize.BUDGET_WINDOW counts now."""
+    now = datetime.now(timezone.utc)
+    for hours_ago, amount in [(25, 9000), (23, 500)]:
+        ledger.insert_event(
+            conn, ledger.utc_timestamp(now - timedelta(hours=hours_ago)), "s0",
+            "transfer", "acct-1234", amount, "ALLOW", scope_id="mom",
+        )
+    conn.commit()
+
+    # 25 hours ago has aged out; 23 hours ago still counts: 500 + 9500 is
+    # exactly the $10,000 cap, and $1 more is over it.
+    assert authorize.authorize_transfer(conn, "s1", "acct-1234", 9500, scope_id="mom") == "ALLOW"
+    assert authorize.authorize_transfer(conn, "s1", "acct-1234", 1, scope_id="mom") == "DENY"
+
+
 def test_session_id_with_a_slash_is_not_split_into_a_home(conn):
     """Without an explicit scope_id, the session_id doubles as the scope.
     Splitting it on "/" would make unrelated sessions "user/123" and
@@ -215,6 +254,31 @@ def test_cedar_policy_error_fails_closed():
             'Account::"acct-1234"',
             {"cumulative_kost": 50000},  # typo: not a real context attribute
         )
+
+
+def test_a_hung_cedar_times_out_and_releases_the_lock(tmp_path, monkeypatch):
+    """Regression test: the Cedar call had no timeout and runs while the
+    ledger's write lock is held, so a hung Cedar blocked every other
+    request (they failed with "database is locked" after 5 s) and never
+    returned itself. It now times out, logs nothing, and lets the next
+    request through."""
+    hung = tmp_path / "cedar"
+    hung.write_text("#!/bin/sh\nexec sleep 30\n")  # exec: the kill reaches sleep
+    hung.chmod(0o755)
+    monkeypatch.setattr(authorize, "CEDAR_BIN", str(hung))
+    monkeypatch.setattr(authorize, "CEDAR_TIMEOUT_SECONDS", 0.3)
+
+    db_path = str(tmp_path / "ledger.db")
+    conn = ledger.connect(db_path)
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="timed out"):
+        authorize.authorize_transfer(conn, "sess-001", "acct-1234", 100)
+    assert time.monotonic() - started < 5
+    assert ledger.list_events(conn) == []
+
+    monkeypatch.setattr(authorize, "CEDAR_BIN", "cedar")
+    other = ledger.connect(db_path)
+    assert authorize.authorize_transfer(other, "sess-002", "acct-1234", 100) == "ALLOW"
 
 
 def test_clean_allow_and_deny_still_work():
