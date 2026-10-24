@@ -312,30 +312,51 @@ FAMILY_LIMITS = {
     "day_flagged": 10_000,
     "gift_card_day": 10_000,
     "new_payee_first": 20_000,
+    "recent_payees": 50_000,
+    "recent_payees_flagged": 0,
     "breaker_denials": 3,
     "breaker_denials_flagged": 1,
 }
 
 # What each forbid in family.cedar does when it fires, in the order a rule
-# is reported when several fire. A deny beats a hold. A rule missing from
-# here is treated as a deny, so adding one to the policy can't fail open
+# is reported when several fire: a deny beats a hold, and within each the
+# most specific rule comes first, so a $450 gift card on a busy day is
+# "gift_card_daily_cap", not just "daily_cap". A rule missing from here is
+# treated as a deny, so adding one to the policy can't fail open
 # (tests/test_family.py checks the two stay in step).
 RULE_OUTCOMES = {
-    "daily_cap": "deny",
     "gift_card_daily_cap": "deny",
     "new_payee_cap": "deny",
+    "daily_cap": "deny",
     "breaker": "hold",
     "gift_card_needs_approval": "hold",
     "new_payee_needs_approval": "hold",
+    "recent_payee_cap": "hold",
     "bill_increase": "hold",
+    "daily_cap_needs_approval": "hold",
 }
 
 # Cedar failed, crashed or timed out. Fail closed: the payment waits.
 GUARD_UNAVAILABLE = "guard_unavailable"
 
+# Which categories each tool can pay. The agent sends the category, so it
+# can't be trusted on its own: "pay_bill" labelled "groceries" must not be
+# a way to buy gift cards past their cap. The tool is what the guard
+# actually does with the money, so it decides. "bill" is accepted for a
+# bill of unknown kind, but only "utility" and "rent" can be known bills.
+TOOL_CATEGORIES = {
+    "pay_bill": {"bill", "utility", "rent", "insurance", "groceries", "pharmacy",
+                 "medical", "home_repair", "donation", "subscription", "personal"},
+    "buy_gift_card": {"gift_card"},
+    "send_zelle": {"transfer"},
+    "send_wire": {"transfer"},
+    "send_crypto": {"crypto"},
+}
+
 BREAKER_WINDOW = timedelta(minutes=10)
 KNOWN_BILL_CATEGORIES = {"utility", "rent"}
 KNOWN_BILL_LOOKBACK = timedelta(days=45)
+RECENT_PAYEE_WINDOW = timedelta(days=30)
 
 
 def _clean_name(field, value):
@@ -359,10 +380,13 @@ def _response(event_id, decision, rule, context):
         "decision": decision.lower(),
         "rule": rule,
         "totals": {"day": context["day_total"],
-                   "gift_card_day": context["gift_card_day_total"]},
+                   "gift_card_day": context["gift_card_day_total"],
+                   "recent_payees": context.get("recent_payees_total", 0)},
         "limits": {"day": limits["day_flagged" if tainted else "day"],
                    "gift_card_day": 0 if tainted else limits["gift_card_day"],
-                   "new_payee_first": 0 if tainted else limits["new_payee_first"]},
+                   "new_payee_first": 0 if tainted else limits["new_payee_first"],
+                   "recent_payees": limits.get(
+                       "recent_payees_flagged" if tainted else "recent_payees", 0)},
         "needs_approval": decision == "HOLD",
         "event_id": event_id,
     }
@@ -440,6 +464,10 @@ def authorize_payment(conn, *, person, chain, tool, amount_cents, payee, categor
     payee = _clean_name("payee", payee)
     category = _clean_name("category", category)
     tool = _clean_name("tool", tool)
+    if tool not in TOOL_CATEGORIES:
+        raise ValueError(f"unknown tool {tool!r}")
+    if category not in TOOL_CATEGORIES[tool]:
+        raise ValueError(f"{tool} can't pay category {category!r}")
     _entity_uid("session_id", session_id)
     scope_id = "/".join(chain)
 
@@ -462,25 +490,36 @@ def authorize_payment(conn, *, person, chain, tool, amount_cents, payee, categor
 
         now = now or datetime.now(timezone.utc)
         day_since = ledger.utc_timestamp(now - BUDGET_WINDOW)
+        recent_since = ledger.utc_timestamp(now - RECENT_PAYEE_WINDOW)
         is_gift_card = category == "gift_card"
         last_bill = None
         if category in KNOWN_BILL_CATEGORIES:
             last_bill = aggregates.last_payment(
                 conn, person, payee, ledger.utc_timestamp(now - KNOWN_BILL_LOOKBACK)
             )
+        known_bill = last_bill is not None
+        first = aggregates.first_paid(conn, person, payee)
+        new_payee = first is None
+        recent_payee = not new_payee and first >= recent_since
         context = {
             "person": person,
             "payee": payee,
             "amount": amount_cents,
             "is_gift_card": is_gift_card,
             "tainted": tainted,
-            "day_total": aggregates.cumulative_cost_for_scope(
-                conn, person, since=day_since) + amount_cents,
+            # Known bills and family-approved payments are left out of the
+            # day (see aggregates.day_total_for_limit); this one too, if
+            # it's a known bill.
+            "day_total": aggregates.day_total_for_limit(conn, person, day_since)
+                + (0 if known_bill else amount_cents),
             "gift_card_day_total": aggregates.cumulative_cost_for_scope(
                 conn, person, since=day_since, category="gift_card")
                 + (amount_cents if is_gift_card else 0),
-            "new_payee": not aggregates.has_paid(conn, person, payee),
-            "known_bill": last_bill is not None,
+            "new_payee": new_payee,
+            "recent_payee": recent_payee,
+            "recent_payees_total": aggregates.recent_payees_total(conn, person, recent_since)
+                + (amount_cents if new_payee or recent_payee else 0),
+            "known_bill": known_bill,
             "last_bill": last_bill or 0,
             "recent_denials": aggregates.denials_since(
                 conn, person, ledger.utc_timestamp(now - BREAKER_WINDOW)),

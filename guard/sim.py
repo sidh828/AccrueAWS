@@ -3,9 +3,11 @@
     python3 -m guard.sim            # prints the scorecard
 
 The gift-card demo is one scam and one afternoon. This is a fuller test:
-Margaret, 78, rents an apartment in Columbus and has a bills agent. She has
-two months of ordinary bank history (rent, seasonal utilities, groceries,
-pharmacy, church), and then September is replayed payment by payment
+Margaret, 78, rents an apartment in Columbus and has a bills agent. The
+guard starts with six months of her ordinary bank history (rent, seasonal
+utilities, groceries, pharmacy, church, car insurance in March), the way
+it would be set up from a bank's statements, and then September is
+replayed payment by payment
 through authorize.authorize_payment, with eight of the frauds that actually
 take older adults' money mixed into it. Everything here is fictional.
 
@@ -21,12 +23,13 @@ Two things make it more than a script:
   trusted person. Only the spending rules stand in the way. That's the
   hard case, and the realistic one.
 
-The daughter gets a phone alert for every stopped or held payment, and
-looks at them at 9:00, 12:30, 18:30 and 21:30. Then she approves Mom's
-real payments that were held, denies the scam ones, calls Mom about any
-scam she was alerted to (which ends it), clears the session's taint, and
-resets the breaker. Payments that go through send no alert, so a scam that
-never trips a rule is never seen.
+The daughter gets a phone alert for every stopped or held payment, and an
+FYI for every payment that went through to someone new or recent (the
+event row's `notice`). She looks at them at 9:00, 12:30, 18:30 and 21:30.
+Then she approves Mom's real payments that were held, denies the scam
+ones, calls Mom about any scam she was alerted to (which ends it), clears
+the session's taint, and resets the breaker. run(reads_notices=False)
+leaves out the FYIs, to show what the rules catch on their own.
 
 The scorecard counts both sides: what each scam took, and what the rules
 cost Margaret - her own payments stopped outright (she can't override a
@@ -105,10 +108,12 @@ def household(month_start, rng, september=False):
         Attempt(on(3, 10), "medicare-partd.example", "insurance", "pay_bill", 3_480),
         Attempt(on(8, 11), "netflix.example", "subscription", "pay_bill", 1_549),
         Attempt(on(12, 10), "aep-ohio.example", "utility", "pay_bill",
-                {7: 13_640, 8: 14_210, 9: 9_870}[month]),
+                {3: 11_820, 4: 9_940, 5: 9_310, 6: 11_960, 7: 13_640, 8: 14_210,
+                 9: 9_870}[month]),
         # Gas: the first cool month costs more than August's - a real rise.
         Attempt(on(15, 10), "columbia-gas.example", "utility", "pay_bill",
-                {7: 3_150, 8: 2_980, 9: 4_420}[month]),
+                {3: 9_860, 4: 6_420, 5: 3_980, 6: 3_310, 7: 3_150, 8: 2_980,
+                 9: 4_420}[month]),
         Attempt(on(17, 14), "great-clips.example", "personal", "pay_bill", 3_200),
         Attempt(on(20, 10), "spectrum.example", "utility", "pay_bill", 8_999),
         Attempt(on(25, 10), "columbus-water.example", "utility", "pay_bill", 4_610),
@@ -125,6 +130,9 @@ def household(month_start, rng, september=False):
         if weekday == 6:  # Sunday
             out.append(Attempt(on(day, 11), "st-marks-church.example", "donation",
                                "pay_bill", 5_000))
+    if month == 3:
+        out.append(Attempt(on(18, 10), "state-farm.example", "insurance", "pay_bill", 61_800,
+                           note="car insurance, paid every six months"))
     if month == 8:
         out.append(Attempt(on(5, 13), "ace-plumbing.example", "home_repair", "pay_bill", 18_500,
                            note="fixed the kitchen sink"))
@@ -263,11 +271,12 @@ SCAMS = [romance_long_con, romance_patient, utility_shutoff, grandparent_bail, t
 
 # --- The month ------------------------------------------------------------------------
 
-def run(conn, seed=0, scams=SCAMS):
-    """Load two months of history into `conn`, replay September through the
-    guard, and return a Report."""
+def run(conn, seed=0, scams=SCAMS, reads_notices=True):
+    """Load six months of history into `conn`, replay September through the
+    guard, and return a Report. With `reads_notices` off, the daughter only
+    hears about stopped and held payments."""
     rng = random.Random(seed)
-    for month in (7, 8):  # bank history from before the guard: all of it went through
+    for month in range(3, 9):  # bank history from before the guard: all of it went through
         for a in household(datetime(2026, month, 1, tzinfo=timezone.utc), rng):
             ledger.insert_event(conn, ledger.utc_timestamp(a.at), "history", "pay", a.payee,
                                 a.amount_cents, "ALLOW", scope_id="/".join(AGENT),
@@ -335,6 +344,8 @@ def run(conn, seed=0, scams=SCAMS):
             pending.append(outcome)
         if outcome.decision != "allow" and attempt.scam:
             alerted.add(attempt.scam)  # stopped or held: her phone buzzes
+        elif reads_notices and attempt.scam and _notice(conn, outcome.event_id):
+            alerted.add(attempt.scam)  # went through, but to someone new: an FYI
 
         if kind == "scam":
             try:
@@ -343,6 +354,12 @@ def run(conn, seed=0, scams=SCAMS):
             except StopIteration:
                 running.pop(attempt.scam, None)
     return report
+
+
+def _notice(conn, event_id):
+    """The event row's `notice`: set when a payment went through to someone
+    new or recent."""
+    return ledger.contract_rows(conn, since=event_id - 1)[0]["notice"]
 
 
 def money(cents):
@@ -386,6 +403,11 @@ def scorecard(seed=0):
     lines = ["Each scam alone:", header]
     for make in SCAMS:
         report = run(ledger.connect(":memory:"), seed, scams=[make])
+        lines.append(scam_line(report, report.scams()[0]))
+
+    lines += ["", "Each scam alone, rules only (the daughter ignores the FYIs):", header]
+    for make in SCAMS:
+        report = run(ledger.connect(":memory:"), seed, scams=[make], reads_notices=False)
         lines.append(scam_line(report, report.scams()[0]))
 
     together = run(ledger.connect(":memory:"), seed)

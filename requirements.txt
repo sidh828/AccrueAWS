@@ -1,0 +1,3 @@
+# Runtime dependencies for the guard HTTP API: none. guard/api.py uses only
+# the standard library (http.server), like dashboard/fake_api.py. The guard
+# needs the cedar CLI on PATH (see README).

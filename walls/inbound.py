@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from walls.secrets import SecretStore, extract_codes
+from walls.storage import WallStateStore
 
 TRUSTED_SOURCES = frozenset({"mom", "family", "daughter"})
 CLEARING_ACTORS = frozenset({"daughter"})
@@ -79,17 +80,27 @@ def deterministic_labels(content: str) -> list[str]:
 
 
 class SessionStore:
-    def __init__(self, clock: Callable[[], float] = time.time):
+    def __init__(
+        self,
+        clock: Callable[[], float] = time.time,
+        storage: WallStateStore | None = None,
+    ):
         self._clock = clock
+        self._storage = storage
         self._sessions: dict[str, SessionState] = {}
         self._lock = threading.Lock()
 
     def is_tainted(self, session_id: str) -> bool:
+        if self._storage:
+            return self._storage.is_tainted(session_id)
         with self._lock:
             s = self._sessions.get(session_id)
             return bool(s and s.tainted)
 
     def taint(self, session_id: str, reason: str) -> None:
+        if self._storage:
+            self._storage.taint(session_id, reason, self._clock())
+            return
         with self._lock:
             s = self._sessions.setdefault(session_id, SessionState())
             if not s.tainted:
@@ -100,13 +111,27 @@ class SessionStore:
         """Only the daughter (via the dashboard) can clear taint. The agent has no tool for this."""
         if actor not in CLEARING_ACTORS:
             raise PermissionError("only the daughter can clear taint")
+        if self._storage:
+            self._storage.clear(session_id)
+            return
         with self._lock:
             self._sessions[session_id] = SessionState()
 
     def state(self, session_id: str) -> SessionState:
+        if self._storage:
+            tainted, since, reasons = self._storage.state(session_id)
+            return SessionState(tainted, since, reasons)
         with self._lock:
             s = self._sessions.get(session_id, SessionState())
             return SessionState(s.tainted, s.since, list(s.reasons))
+
+    def persist_taint_and_codes(
+        self, session_id: str, reason: str, codes: list[str], now: float
+    ) -> bool:
+        if self._storage:
+            self._storage.taint_and_record_codes(session_id, reason, tuple(codes), now)
+            return True
+        return False
 
 
 class InboundWall:
@@ -120,7 +145,11 @@ class InboundWall:
         if trusted:
             return InboundResult(True, self.sessions.is_tainted(session_id), labels, content)
         # Untrusted: taint first, then remember any verification codes in it.
-        self.sessions.taint(session_id, f"untrusted:{(source or 'unknown').lower()}")
-        for code in extract_codes(content):
-            self.secrets.record_code(code)
+        reason = f"untrusted:{(source or 'unknown').lower()}"
+        codes = extract_codes(content)
+        now = self.secrets.now()
+        if not self.sessions.persist_taint_and_codes(session_id, reason, codes, now):
+            self.sessions.taint(session_id, reason)
+            for code in codes:
+                self.secrets.record_code(code)
         return InboundResult(False, True, labels, wrap_untrusted(content, source))

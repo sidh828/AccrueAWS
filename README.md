@@ -39,7 +39,20 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 # budget. The first is allowed, the rest are denied.
 .venv/bin/python -m guard.main
 
-# the family dashboard against a stand-in API (until guard/api.py exists).
+# the live guard API (agent tools call /authorize, /inbound and /outbound;
+# the dashboard reads /events and /stream and approves through /override).
+# It prints the dashboard links. Keys, generated once and kept stable and
+# outside the database:
+#   ACCRUE_WALL_KEY     keys the walls' stored code digests (32+ bytes); without
+#                       it, taint and received codes are forgotten on restart
+#   ACCRUE_LEDGER_KEY   keys the ledger's hash chain
+#   ACCRUE_DASHBOARD_TOKEN  the dashboard's secret for approving (else made up)
+#   ACCRUE_ALLOWED_CONTACTS comma-separated recipients /outbound always allows
+# Generate a key with: python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+.venv/bin/python -m guard.api --db ledger.db
+# Password-vault entries are still in memory and must be loaded at startup.
+
+# the family dashboard against a stand-in API:
 # It prints two links: the one ending in #token=... can approve payments
 # (open it once on each device that should), the other is read-only.
 python3 dashboard/fake_api.py

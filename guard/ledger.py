@@ -16,6 +16,8 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 
+from . import explain
+
 # `home` is the first segment of scope_id (see home_scope), stored so the
 # budget and breaker queries in aggregates.py are an indexed equality
 # lookup instead of a scan of every row ever logged. (home, timestamp)
@@ -312,40 +314,68 @@ def get_event(conn, event_id):
 _STATUS = {"ALLOW": "allowed", "DENY": "released", "HOLD": "held"}
 
 
+def _contract_shape(event):
+    decision = event["decision"]
+    context = event["context"] or {}
+    notice = None
+    if decision == "ALLOW" and context.get("new_payee"):
+        notice = "new_payee"
+    elif decision == "ALLOW" and context.get("recent_payee"):
+        notice = "recent_payee"
+    return {
+        "event_id": event["id"],
+        "ts": event["timestamp"],
+        "status": _STATUS[decision],
+        "person": event["home"],
+        "chain": event["chain"] or event["scope_id"].split("/"),
+        "tool": event["tool"] or event["action"],
+        "amount_cents": event["amount_cents"],
+        "payee": event["payee"] or event["resource"],
+        "category": event["category"],
+        "decision": decision.lower(),
+        "rule": event["rule"],
+        "explanation": explain.explain(event),
+        "flagged": decision != "ALLOW",
+        "row_hash": event["row_hash"],
+        "resolves": event["resolves"],
+        "notice": notice,
+        "known_bill": bool(context.get("known_bill")),
+    }
+
+
 def contract_rows(conn, since=0):
     """Events with an id above `since`, in id order, shaped as CLAUDE.md's
-    event row - what GET /events and /stream send.
+    event row: the ledger as it is, one row per entry.
 
-    One field is added to the contract's: `resolves`, the event_id of the
-    held payment this row approves or denies (None otherwise). A held row
-    is settled once a later row resolves it; the held row itself never
-    changes. `explanation` is None until explain.py lands.
+    Three fields are added to the contract's:
+
+    - `resolves`: the event_id of the held payment this row approves or
+      denies (None otherwise). A held row is settled once a later row
+      resolves it; the held row itself never changes. (api.py folds each
+      resolving row into the payment it settles before sending rows to the
+      dashboard; see api.payment_views.)
+    - `notice`: "new_payee" (a first payment ever) or "recent_payee" (to
+      someone first paid in the last 30 days) on a payment that went
+      through, else None. It's the FYI alert for payments no rule stopped:
+      a patient scam never trips a rule, so this is how the family hears
+      about it.
+    - `known_bill`: the guard recognized this as a known bill (rent or a
+      utility within its usual amount), which the day's total leaves out.
+
+    `explanation` is guard.explain's plain-English sentence for the
+    decision, worked out from the logged context when the row is read.
     """
     rows = conn.execute(
         f"SELECT {', '.join(_ROW_COLUMNS)} FROM events WHERE id > ? ORDER BY id",
         (since,),
     ).fetchall()
-    out = []
-    for event in map(_row_dict, rows):
-        decision = event["decision"]
-        out.append({
-            "event_id": event["id"],
-            "ts": event["timestamp"],
-            "status": _STATUS[decision],
-            "person": event["home"],
-            "chain": event["chain"] or event["scope_id"].split("/"),
-            "tool": event["tool"] or event["action"],
-            "amount_cents": event["amount_cents"],
-            "payee": event["payee"] or event["resource"],
-            "category": event["category"],
-            "decision": decision.lower(),
-            "rule": event["rule"],
-            "explanation": None,
-            "flagged": decision != "ALLOW",
-            "row_hash": event["row_hash"],
-            "resolves": event["resolves"],
-        })
-    return out
+    return [_contract_shape(_row_dict(row)) for row in rows]
+
+
+def contract_row(conn, event_id):
+    """One event shaped as contract_rows shapes it, or None."""
+    event = get_event(conn, event_id)
+    return None if event is None else _contract_shape(event)
 
 
 def find_by_request_id(conn, request_id):
