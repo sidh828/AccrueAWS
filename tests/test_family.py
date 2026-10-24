@@ -165,6 +165,21 @@ def test_a_deny_beats_a_hold(conn):
     assert outcome(response) == ("deny", "daily_cap")
 
 
+def test_the_most_specific_rule_is_reported(conn):
+    """The scam day: after $170 of ordinary spending, a $450 gift card is
+    over both the gift card cap and the daily cap. The dashboard says
+    "gift card blocked", so the gift card rule is the one reported; the
+    same for a $450 Zelle to someone new."""
+    paid_before(conn, "ohio-power.example", 11_000, "utility", days_ago=30)
+    paid_before(conn, "giftcards.example", category="gift_card")
+    pay(conn, 12_000, "ohio-power.example", "utility")
+    pay(conn, 5_000, "giftcards.example", "gift_card")
+    assert outcome(pay(conn, 45_000, "giftcards.example", "gift_card")) == (
+        "deny", "gift_card_daily_cap")
+    assert outcome(pay(conn, 45_000, "zelle:new-contact", "transfer")) == (
+        "deny", "new_payee_cap")
+
+
 # --- Holds and the family's answer ---------------------------------------------
 
 def test_a_held_payment_counts_only_once_approved(conn):

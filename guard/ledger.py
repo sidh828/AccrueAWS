@@ -312,40 +312,49 @@ def get_event(conn, event_id):
 _STATUS = {"ALLOW": "allowed", "DENY": "released", "HOLD": "held"}
 
 
+def _contract_shape(event):
+    decision = event["decision"]
+    return {
+        "event_id": event["id"],
+        "ts": event["timestamp"],
+        "status": _STATUS[decision],
+        "person": event["home"],
+        "chain": event["chain"] or event["scope_id"].split("/"),
+        "tool": event["tool"] or event["action"],
+        "amount_cents": event["amount_cents"],
+        "payee": event["payee"] or event["resource"],
+        "category": event["category"],
+        "decision": decision.lower(),
+        "rule": event["rule"],
+        "explanation": None,
+        "flagged": decision != "ALLOW",
+        "row_hash": event["row_hash"],
+        "resolves": event["resolves"],
+    }
+
+
 def contract_rows(conn, since=0):
     """Events with an id above `since`, in id order, shaped as CLAUDE.md's
-    event row - what GET /events and /stream send.
+    event row: the ledger as it is, one row per entry.
 
     One field is added to the contract's: `resolves`, the event_id of the
     held payment this row approves or denies (None otherwise). A held row
     is settled once a later row resolves it; the held row itself never
-    changes. `explanation` is None until explain.py lands.
+    changes. `explanation` is None until explain.py lands. (api.py folds
+    each resolving row into the payment it settles before sending rows to
+    the dashboard; see api.payment_views.)
     """
     rows = conn.execute(
         f"SELECT {', '.join(_ROW_COLUMNS)} FROM events WHERE id > ? ORDER BY id",
         (since,),
     ).fetchall()
-    out = []
-    for event in map(_row_dict, rows):
-        decision = event["decision"]
-        out.append({
-            "event_id": event["id"],
-            "ts": event["timestamp"],
-            "status": _STATUS[decision],
-            "person": event["home"],
-            "chain": event["chain"] or event["scope_id"].split("/"),
-            "tool": event["tool"] or event["action"],
-            "amount_cents": event["amount_cents"],
-            "payee": event["payee"] or event["resource"],
-            "category": event["category"],
-            "decision": decision.lower(),
-            "rule": event["rule"],
-            "explanation": None,
-            "flagged": decision != "ALLOW",
-            "row_hash": event["row_hash"],
-            "resolves": event["resolves"],
-        })
-    return out
+    return [_contract_shape(_row_dict(row)) for row in rows]
+
+
+def contract_row(conn, event_id):
+    """One event shaped as contract_rows shapes it, or None."""
+    event = get_event(conn, event_id)
+    return None if event is None else _contract_shape(event)
 
 
 def find_by_request_id(conn, request_id):
