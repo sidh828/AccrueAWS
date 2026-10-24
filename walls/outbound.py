@@ -64,8 +64,8 @@ class OutboundWall:
     def _check(self, session_id: str, recipient: str, channel: str, content: str) -> dict:
         findings = self.secrets.scan(content)
         # Only card-sized groups count; "group 2 is 1111" keeps 1111, not the 2.
-        groups = [g for g in ("".join(t.digits for t in run) for run in digit_runs(content))
-                  if 4 <= len(g) <= 6]
+        groups = [t.digits for run in digit_runs(content) for t in run
+                  if 4 <= len(t.digits) <= 6]
         if self._completes_a_card(session_id, groups):
             findings.append(Finding("card_number", 0, len(content), label="across messages"))
         kinds = {f.kind for f in findings}
@@ -100,8 +100,8 @@ class OutboundWall:
             self._sent_groups.setdefault(session_id, []).extend((now, g) for g in groups if g)
 
     def _completes_a_card(self, session_id: str, groups: list[str]) -> bool:
-        """Whether this message's digit groups, after the groups sent before
-        it, end a 13-19 digit number that passes the Luhn check. Only whole
+        """Whether this message's digit groups - with words between them, or
+        after the groups sent before it - end a card number. Only whole
         groups, in the order they went out - never arbitrary digits glued
         together - so ordinary numbers in separate messages rarely match."""
         # Card-shaped only: pieces of 4-6 digits (how a card is read out),
@@ -117,8 +117,7 @@ class OutboundWall:
                 digits = sequence[start] + digits
                 if len(digits) > 16:
                     break
-                if (len(digits) in (15, 16) and digits[0] in "23456" and luhn_valid(digits)
-                        and start < len(sequence) - len(groups)):
+                if len(digits) in (15, 16) and digits[0] in "23456" and luhn_valid(digits):
                     return True
         return False
 

@@ -24,7 +24,10 @@ _CODE_AFTER = re.compile(
 _CODE_BEFORE = re.compile(
     r"(?i)(?<!\d)(\d{4,8})(?!\d)\s*(?:is|=)?\s*(?:your|the)\s+(?:\w+\s+){0,2}(?:code|otp|passcode|pin)"
 )
-_SSN = re.compile(r"(?<!\d)(\d{3})[- ](\d{2})[- ](\d{4})(?!\d)")
+_SSN = re.compile(r"(?<!\d)(\d{3})[-. ](\d{2})[-. ](\d{4})(?!\d)")
+# A bare 9 digits is an SSN only when it's called one (else it may be a
+# routing number or anything else).
+_SSN_NAMED = re.compile(r"(?i)\b(?:ssn|social security(?: number)?)\D{0,20}?(?<!\d)(\d{3})(\d{2})(\d{4})(?!\d)")
 _NINE = re.compile(r"(?<!\d)\d{9}(?!\d)")
 _ACCOUNT = re.compile(r"(?i)(?:account|acct)\D{0,15}?(?<!\d)(\d{6,17})(?!\d)")
 
@@ -179,7 +182,8 @@ class SecretStore:
     def _scan_ssn(self, text: str) -> list[Finding]:
         return [
             Finding("ssn", m.start(), m.end())
-            for m in _SSN.finditer(text)
+            for pattern in (_SSN, _SSN_NAMED)
+            for m in pattern.finditer(text)
             if ssn_valid(*m.groups())
         ]
 
