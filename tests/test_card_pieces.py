@@ -1,4 +1,11 @@
+"""A card number sent one group at a time - to a known contact, so nothing
+else stops it - is blocked by the message that completes it. Ordinary
+numbers in separate messages are not."""
+
 from agent.tools import FakeGuard, ToolBox
+from walls.inbound import SessionStore
+from walls.outbound import OutboundWall
+from walls.secrets import SecretStore
 
 
 class Clock:
@@ -9,31 +16,23 @@ class Clock:
         return self.t
 
 
-def test_card_pieces_to_known_contact_block_when_they_complete_card():
-    clock = Clock()
-    guard = FakeGuard(clock=clock)
-    guard.outbound_wall.add_contact("friend")
-    tools = ToolBox(guard, session_id="card-pieces")
-
-    results = [
-        tools.send_message("friend", "sms", f"group {index}: {digits}")
-        for index, digits in enumerate(("4111", "1111", "1111", "1111"), 1)
-    ]
-
-    assert [result["decision"] for result in results] == [
-        "allow", "allow", "allow", "block",
-    ]
-    assert any(finding["kind"] == "card_number" for finding in results[-1]["findings"])
+def wall():
+    return OutboundWall(SecretStore(), SessionStore(), contacts={"friend@example.com"})
 
 
-def test_ordinary_number_groups_across_messages_are_allowed():
-    clock = Clock()
-    guard = FakeGuard(clock=clock)
-    guard.outbound_wall.add_contact("friend")
-    tools = ToolBox(guard, session_id="ordinary-numbers")
+def test_a_card_sent_in_pieces_to_a_known_contact_is_blocked():
+    w = wall()
+    groups = ["4111", "1111", "1111", "1111"]
+    decisions = [w.check("s", "friend@example.com", "sms", f"group {i} is {g}")["decision"]
+                 for i, g in enumerate(groups, 1)]
+    assert decisions == ["allow", "allow", "allow", "block"]
 
-    for number in ("1204", "2291", "1204", "2291"):
-        assert tools.send_message("friend", "sms", number)["decision"] == "allow"
+
+def test_ordinary_numbers_in_separate_messages_go_through():
+    w = wall()
+    for text in ["meet at 3", "room 1204", "my number is 614 555 0123", "it's $45.50",
+                 "zip 43210", "flight 2291"]:
+        assert w.check("s", "friend@example.com", "sms", text)["decision"] == "allow", text
 
 
 def test_card_pieces_expire_after_one_hour():

@@ -1,4 +1,4 @@
-Evidence mode: real Cedar-backed ledger; commit 1e343cab225eb89e0dfe9150ad7f86f87f1b6afe plus uncommitted working-tree changes.
+Evidence mode: real Cedar-backed ledger; regenerated after merging the latest main.
 
 | Attack | Per-call check | Prompt-only guard | Scam wall | Our guard |
 |---|---|---|---|---|
