@@ -68,11 +68,12 @@ def pay(guard, amount, payee="grocer.example", category="groceries", **extra):
 
 
 def known_payee(guard, payee="grocer.example", category="groceries"):
-    """A payment two days ago, so `payee` isn't new and today starts at $0."""
+    """A payment 60 days ago, so `payee` is someone Margaret has paid for a
+    while (not new, not recent) and today starts at $0."""
     from datetime import datetime, timedelta, timezone
     conn = ledger.connect(guard["db"])
     ledger.insert_event(
-        conn, ledger.utc_timestamp(datetime.now(timezone.utc) - timedelta(days=2)),
+        conn, ledger.utc_timestamp(datetime.now(timezone.utc) - timedelta(days=60)),
         "sess-0", "pay", payee, 100, "ALLOW", scope_id="mom/bills-agent",
         payee=payee, category=category,
     )
@@ -85,14 +86,15 @@ def test_authorize_answers_in_the_contract_shape(guard):
     status, body = pay(guard, 12_000, request_id="req-1")
     assert status == 200
     assert body == {"decision": "allow", "rule": None,
-                    "totals": {"day": 12_000, "gift_card_day": 0},
-                    "limits": {"day": 50_000, "gift_card_day": 10_000, "new_payee_first": 20_000},
+                    "totals": {"day": 12_000, "gift_card_day": 0, "recent_payees": 0},
+                    "limits": {"day": 50_000, "gift_card_day": 10_000, "new_payee_first": 20_000,
+                               "recent_payees": 50_000},
                     "needs_approval": False, "event_id": 2}
     assert pay(guard, 12_000, request_id="req-1") == (200, body)  # a retry, not a new payment
 
     status, rows = call(guard, "GET", "/events?since=1")
     assert status == 200 and len(rows) == 1
-    assert set(rows[0]) == CONTRACT_FIELDS | {"resolved_by"}
+    assert set(rows[0]) == CONTRACT_FIELDS | {"resolved_by", "notice", "known_bill"}
     assert rows[0]["status"] == "allowed" and rows[0]["ts"].endswith("Z")
 
 
@@ -154,9 +156,11 @@ def test_an_approval_settles_the_payment_it_resolves(guard):
     _, rows = call(guard, "GET", f"/events?since={held['event_id']}")
     assert [(r["event_id"], r["status"]) for r in rows] == [(held["event_id"], "allowed")]
 
-    # Counted: $50 approved, so $450 more reaches the $500 line exactly.
-    assert pay(guard, 45_000)[1]["decision"] == "allow"
-    assert pay(guard, 1)[1]["rule"] == "daily_cap"
+    # Approved with the family's OK, so it doesn't use up the day: the full
+    # $500 is still there for groceries, and past it a payment to someone
+    # she's paid before waits for the family.
+    assert pay(guard, 50_000)[1]["decision"] == "allow"
+    assert pay(guard, 1)[1]["rule"] == "daily_cap_needs_approval"
 
     assert call(guard, "POST", "/override",
                 {"event_id": held["event_id"], "action": "deny"}, token=TOKEN)[0] == 409
@@ -240,6 +244,7 @@ def test_verify_and_limits(guard):
     status, limits = call(guard, "GET", "/limits")
     assert status == 200
     assert limits["normal"]["day"] == 50_000 and limits["flagged"]["day"] == 10_000
+    assert limits["normal"]["recent_payees"] == 50_000
 
 
 def test_the_dashboard_is_served(guard):

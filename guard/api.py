@@ -105,8 +105,10 @@ def limits():
     return {
         "normal": {"day": limit["day"], "gift_card_day": limit["gift_card_day"],
                    "new_payee_first": limit["new_payee_first"],
+                   "recent_payees": limit["recent_payees"],
                    "breaker_denials": limit["breaker_denials"]},
         "flagged": {"day": limit["day_flagged"], "gift_card_day": 0, "new_payee_first": 0,
+                    "recent_payees": limit["recent_payees_flagged"],
                     "breaker_denials": limit["breaker_denials_flagged"]},
     }
 

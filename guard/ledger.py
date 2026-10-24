@@ -314,6 +314,12 @@ _STATUS = {"ALLOW": "allowed", "DENY": "released", "HOLD": "held"}
 
 def _contract_shape(event):
     decision = event["decision"]
+    context = event["context"] or {}
+    notice = None
+    if decision == "ALLOW" and context.get("new_payee"):
+        notice = "new_payee"
+    elif decision == "ALLOW" and context.get("recent_payee"):
+        notice = "recent_payee"
     return {
         "event_id": event["id"],
         "ts": event["timestamp"],
@@ -330,6 +336,8 @@ def _contract_shape(event):
         "flagged": decision != "ALLOW",
         "row_hash": event["row_hash"],
         "resolves": event["resolves"],
+        "notice": notice,
+        "known_bill": bool(context.get("known_bill")),
     }
 
 
@@ -337,12 +345,22 @@ def contract_rows(conn, since=0):
     """Events with an id above `since`, in id order, shaped as CLAUDE.md's
     event row: the ledger as it is, one row per entry.
 
-    One field is added to the contract's: `resolves`, the event_id of the
-    held payment this row approves or denies (None otherwise). A held row
-    is settled once a later row resolves it; the held row itself never
-    changes. `explanation` is None until explain.py lands. (api.py folds
-    each resolving row into the payment it settles before sending rows to
-    the dashboard; see api.payment_views.)
+    Three fields are added to the contract's:
+
+    - `resolves`: the event_id of the held payment this row approves or
+      denies (None otherwise). A held row is settled once a later row
+      resolves it; the held row itself never changes. (api.py folds each
+      resolving row into the payment it settles before sending rows to the
+      dashboard; see api.payment_views.)
+    - `notice`: "new_payee" (a first payment ever) or "recent_payee" (to
+      someone first paid in the last 30 days) on a payment that went
+      through, else None. It's the FYI alert for payments no rule stopped:
+      a patient scam never trips a rule, so this is how the family hears
+      about it.
+    - `known_bill`: the guard recognized this as a known bill (rent or a
+      utility within its usual amount), which the day's total leaves out.
+
+    `explanation` is None until explain.py lands.
     """
     rows = conn.execute(
         f"SELECT {', '.join(_ROW_COLUMNS)} FROM events WHERE id > ? ORDER BY id",

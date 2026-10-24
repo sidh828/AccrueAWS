@@ -312,6 +312,8 @@ FAMILY_LIMITS = {
     "day_flagged": 10_000,
     "gift_card_day": 10_000,
     "new_payee_first": 20_000,
+    "recent_payees": 50_000,
+    "recent_payees_flagged": 0,
     "breaker_denials": 3,
     "breaker_denials_flagged": 1,
 }
@@ -329,7 +331,9 @@ RULE_OUTCOMES = {
     "breaker": "hold",
     "gift_card_needs_approval": "hold",
     "new_payee_needs_approval": "hold",
+    "recent_payee_cap": "hold",
     "bill_increase": "hold",
+    "daily_cap_needs_approval": "hold",
 }
 
 # Cedar failed, crashed or timed out. Fail closed: the payment waits.
@@ -338,6 +342,7 @@ GUARD_UNAVAILABLE = "guard_unavailable"
 BREAKER_WINDOW = timedelta(minutes=10)
 KNOWN_BILL_CATEGORIES = {"utility", "rent"}
 KNOWN_BILL_LOOKBACK = timedelta(days=45)
+RECENT_PAYEE_WINDOW = timedelta(days=30)
 
 
 def _clean_name(field, value):
@@ -361,10 +366,13 @@ def _response(event_id, decision, rule, context):
         "decision": decision.lower(),
         "rule": rule,
         "totals": {"day": context["day_total"],
-                   "gift_card_day": context["gift_card_day_total"]},
+                   "gift_card_day": context["gift_card_day_total"],
+                   "recent_payees": context.get("recent_payees_total", 0)},
         "limits": {"day": limits["day_flagged" if tainted else "day"],
                    "gift_card_day": 0 if tainted else limits["gift_card_day"],
-                   "new_payee_first": 0 if tainted else limits["new_payee_first"]},
+                   "new_payee_first": 0 if tainted else limits["new_payee_first"],
+                   "recent_payees": limits.get(
+                       "recent_payees_flagged" if tainted else "recent_payees", 0)},
         "needs_approval": decision == "HOLD",
         "event_id": event_id,
     }
@@ -464,25 +472,36 @@ def authorize_payment(conn, *, person, chain, tool, amount_cents, payee, categor
 
         now = now or datetime.now(timezone.utc)
         day_since = ledger.utc_timestamp(now - BUDGET_WINDOW)
+        recent_since = ledger.utc_timestamp(now - RECENT_PAYEE_WINDOW)
         is_gift_card = category == "gift_card"
         last_bill = None
         if category in KNOWN_BILL_CATEGORIES:
             last_bill = aggregates.last_payment(
                 conn, person, payee, ledger.utc_timestamp(now - KNOWN_BILL_LOOKBACK)
             )
+        known_bill = last_bill is not None
+        first = aggregates.first_paid(conn, person, payee)
+        new_payee = first is None
+        recent_payee = not new_payee and first >= recent_since
         context = {
             "person": person,
             "payee": payee,
             "amount": amount_cents,
             "is_gift_card": is_gift_card,
             "tainted": tainted,
-            "day_total": aggregates.cumulative_cost_for_scope(
-                conn, person, since=day_since) + amount_cents,
+            # Known bills and family-approved payments are left out of the
+            # day (see aggregates.day_total_for_limit); this one too, if
+            # it's a known bill.
+            "day_total": aggregates.day_total_for_limit(conn, person, day_since)
+                + (0 if known_bill else amount_cents),
             "gift_card_day_total": aggregates.cumulative_cost_for_scope(
                 conn, person, since=day_since, category="gift_card")
                 + (amount_cents if is_gift_card else 0),
-            "new_payee": not aggregates.has_paid(conn, person, payee),
-            "known_bill": last_bill is not None,
+            "new_payee": new_payee,
+            "recent_payee": recent_payee,
+            "recent_payees_total": aggregates.recent_payees_total(conn, person, recent_since)
+                + (amount_cents if new_payee or recent_payee else 0),
+            "known_bill": known_bill,
             "last_bill": last_bill or 0,
             "recent_denials": aggregates.denials_since(
                 conn, person, ledger.utc_timestamp(now - BREAKER_WINDOW)),
