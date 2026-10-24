@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from walls.normalize import digit_runs, digit_stream, nfkc
+from walls.normalize import digit_stream, nfkc, tokens
 from walls.storage import WallStateStore
 
 CODE_WINDOW_SECONDS = 3600  # remember received codes for one hour
@@ -25,6 +25,7 @@ _CODE_BEFORE = re.compile(
     r"(?i)(?<!\d)(\d{4,8})(?!\d)\s*(?:is|=)?\s*(?:your|the)\s+(?:\w+\s+){0,2}(?:code|otp|passcode|pin)"
 )
 _SSN = re.compile(r"(?<!\d)(\d{3})[- ](\d{2})[- ](\d{4})(?!\d)")
+_SSN_UNFORMATTED = re.compile(r"(?<!\d)(\d{3})(\d{2})(\d{4})(?!\d)")
 _NINE = re.compile(r"(?<!\d)\d{9}(?!\d)")
 _ACCOUNT = re.compile(r"(?i)(?:account|acct)\D{0,15}?(?<!\d)(\d{6,17})(?!\d)")
 
@@ -154,34 +155,52 @@ class SecretStore:
         return out
 
     def _scan_cards(self, text: str) -> list[Finding]:
-        """Luhn check on the cleaned digits of each run ("4111 1111...", "4-1-1-1...",
-        spelled-out digits). Token-aligned windows catch a card with extra digits
-        appended. Runs are checked separately so unrelated numbers are never glued."""
+        """Luhn-check digit groups, allowing a few words between card groups."""
         out: list[Finding] = []
         whole = nfkc(text) != text  # positions would not line up: flag the whole message
-        for run in digit_runs(text):
-            hit = None
-            for i in range(len(run)):
-                digits = ""
-                for j in range(i, len(run)):
-                    digits += run[j].digits
-                    if len(digits) > 19:
+        parts = tokens(text)
+        for i, first in enumerate(parts):
+            if first.digits is None:
+                continue
+            digits = ""
+            end = first.end
+            words_between = 0
+            hit = False
+            for part in parts[i:]:
+                if part.digits is None:
+                    words_between += 1
+                    if words_between > 3 or part.end - end > 32:
                         break
-                    if len(digits) >= 13 and luhn_valid(digits):
-                        hit = (run[i].start, run[j].end)
-                        break
-                if hit:
+                    continue
+                if words_between > 3 or part.start - end > 32:
+                    break
+                digits += part.digits
+                if len(digits) > 19:
+                    break
+                end = part.end
+                words_between = 0
+                if len(digits) >= 13 and luhn_valid(digits):
+                    hit = True
                     break
             if hit:
-                out.append(Finding("card_number", 0, len(text)) if whole else Finding("card_number", *hit))
+                out.append(
+                    Finding("card_number", 0, len(text))
+                    if whole else Finding("card_number", first.start, end)
+                )
         return out
 
     def _scan_ssn(self, text: str) -> list[Finding]:
-        return [
+        findings = [
             Finding("ssn", m.start(), m.end())
             for m in _SSN.finditer(text)
             if ssn_valid(*m.groups())
         ]
+        findings.extend(
+            Finding("ssn", m.start(), m.end())
+            for m in _SSN_UNFORMATTED.finditer(text)
+            if ssn_valid(*m.groups())
+        )
+        return findings
 
     def _scan_bank(self, text: str) -> list[Finding]:
         out = [Finding("routing_number", m.start(), m.end()) for m in _NINE.finditer(text) if aba_valid(m.group())]

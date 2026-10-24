@@ -40,17 +40,7 @@ def real_suite(monkeypatch):
         return Env(ToolBox(LocalGuard(clock=clock), session_id=f"atk-{uuid.uuid4().hex[:8]}"),
                    clock.advance, defense)
 
-    # The real guard reports rule None for an allowed payment (the
-    # contract's null); the scorer sorts rule names and can't compare None
-    # with a string. Name it here until the scorer handles it.
-    score = scorer.from_scenario
-
-    def from_scenario(res):
-        res.rules = type(res.rules)({(k or "allowed"): v for k, v in res.rules.items()})
-        return score(res)
-
     monkeypatch.setattr(attack_suite, "make_env", make_env)
-    monkeypatch.setattr(attack_suite, "from_scenario", from_scenario)
     return attack_suite.run_suite()
 
 

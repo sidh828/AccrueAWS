@@ -32,7 +32,12 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", type=int, default=20)
     args = ap.parse_args()
-    import anthropic  # imported here so the rest of the repo needs no SDK
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise SystemExit("Set ANTHROPIC_API_KEY to run the live refusal test.")
+    try:
+        import anthropic  # imported here so the rest of the repo needs no SDK
+    except ImportError as exc:
+        raise SystemExit("Install the optional Anthropic SDK with `pip install anthropic`.") from exc
 
     model = os.environ.get("ACCRUE_MODEL", "claude-sonnet-5-5")
     client = anthropic.Anthropic()
