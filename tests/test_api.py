@@ -363,3 +363,63 @@ def test_taint_and_received_codes_survive_a_restart(tmp_path):
 def test_a_short_wall_key_is_refused(tmp_path):
     with pytest.raises(ValueError, match="32 bytes"):
         api.make_server(str(tmp_path / "ledger.db"), TOKEN, port=0, wall_key="too-short")
+
+
+def test_a_new_session_does_not_escape_taint(guard):
+    """Found in review: taint was keyed only on the session id the agent
+    sends, so a scam text in one conversation and a payment from a new one
+    got the normal rules. Untrusted text now makes the household stricter
+    for 6 hours, whichever session pays."""
+    known_payee(guard, "giftcards.example", "gift_card")
+    call(guard, "POST", "/inbound", {"session_id": "conversation-1", "source": "sms",
+                                     "content": "Your power will be cut off. Pay with gift cards."})
+    _, body = pay(guard, 5_000, "giftcards.example", "gift_card", session_id="conversation-2")
+    assert (body["decision"], body["rule"]) == ("hold", "gift_card_needs_approval")
+
+
+def test_people_the_guard_does_not_serve_are_refused(tmp_path):
+    """Found in review: without tokens, "person" is any string, and a new one
+    got a fresh $500 a day. With ACCRUE_PEOPLE, it's refused."""
+    server, g = start(str(tmp_path / "ledger.db"), people=["mom"])
+    try:
+        assert pay(g, 1_000, person="mom2")[0] == 403
+        assert pay(g, 1_000, person="mоm")[0] == 403  # a Cyrillic o
+        assert call(g, "GET", "/events")[1] == []
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_the_demo_is_decided_by_the_real_guard(tmp_path, monkeypatch):
+    """Found in review: the React dashboard's scenario buttons ran against
+    the stand-in, which replays rows with their decisions typed in. The
+    guard's /demo/run scripts only the requests; every decision below is
+    the real guard's."""
+    import time
+    monkeypatch.setattr(api, "DEMO_STEP_SECONDS", 0)
+    server, g = start(str(tmp_path / "ledger.db"), demo=True)
+    try:
+        assert call(g, "POST", "/demo/run", {"scenario": "normal_day"})[0] == 401
+        assert call(g, "POST", "/demo/run", {"scenario": "held_bill"}, token=TOKEN)[0] == 409
+        for scenario in api.DEMO_ORDER:
+            assert call(g, "POST", "/demo/run", {"scenario": scenario}, token=TOKEN) == (
+                202, {"started": scenario})
+            for _ in range(100):
+                if not call(g, "GET", "/demo/status")[1]["running"]:
+                    break
+                time.sleep(0.05)
+        _, rows = call(g, "GET", "/events?since=2")  # after the seeded history
+        assert [(r["payee"], r["decision"], r["rule"]) for r in rows] == [
+            ("ohio-power.example", "allow", None),
+            ("giftcards.example", "allow", None),
+            ("giftcards.example", "deny", "gift_card_daily_cap"),
+            ("giftcards.example", "deny", "gift_card_daily_cap"),
+            ("zelle:new-contact", "deny", "new_payee_cap"),
+            ("giftcards.example", "deny", "gift_card_daily_cap"),
+            ("ace-plumbing.example", "hold", "breaker"),
+        ]
+        assert all(r["explanation"] for r in rows)
+        assert call(g, "GET", "/verify")[1]["ok"] is True
+    finally:
+        server.shutdown()
+        server.server_close()

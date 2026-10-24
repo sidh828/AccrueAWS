@@ -59,11 +59,11 @@ def test_a_romance_scam_is_noticed_after_the_first_payment(scam):
 
 def test_a_patient_drip_is_noticed_within_a_week_even_without_the_fyis():
     """$250 every three days never crosses a day's limit. Before the
-    recent-payee cap it took $2,400 in September and was never seen. Now,
-    even if the daughter ignores every FYI, the third payment passes $500 to
-    recent payees, waits for her, and she ends it within a week."""
+    recent-payee caps it took $2,400 in September and was never seen. Now,
+    even if the daughter ignores every FYI, the second payment passes $200
+    to someone first paid this month, waits for her, and she ends it."""
     report, name = alone(sim.romance_patient, reads_notices=False)
-    assert report.lost(name) == 40_000
+    assert report.lost(name) == 15_000
     assert (report.stopped[name] - first_try(report, name).attempt.at).days < 7
 
 
