@@ -105,6 +105,7 @@ def test_override_settles_a_held_payment_once(api):
         with pytest.raises(urllib.error.HTTPError) as err:
             post(f"{api}/override", body)
         assert err.value.code == code
+        err.value.close()
 
 
 def test_stream_resumes_after_last_event_id_and_sends_changes_without_an_id(played):
@@ -137,6 +138,7 @@ def test_only_the_dashboard_files_are_served(api):
         with pytest.raises(urllib.error.HTTPError) as err:
             urllib.request.urlopen(api + path)
         assert err.value.code == 404
+        err.value.close()
 
 
 def test_an_oversized_override_body_is_refused_unread(api):
@@ -144,7 +146,9 @@ def test_an_oversized_override_body_is_refused_unread(api):
     conn.putrequest("POST", "/override")
     conn.putheader("Content-Length", str(10**9))  # declared, never sent
     conn.endheaders()
-    assert conn.getresponse().status == 413
+    res = conn.getresponse()
+    assert res.status == 413
+    res.close()
     conn.close()
 
 
@@ -155,6 +159,7 @@ def test_live_streams_are_capped():
             with pytest.raises(urllib.error.HTTPError) as err:
                 urllib.request.urlopen(f"{url}/stream", timeout=5)
             assert err.value.code == 503
+            err.value.close()
 
 
 # ---- phone alerts -----------------------------------------------------------

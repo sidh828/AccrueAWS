@@ -12,6 +12,9 @@ permissions:
 # `stable` especially) can be moved to new code at any time. Bump a pin by
 # replacing the hash and the comment beside it.
 
+env:
+  CEDAR_VERSION: 4.12.0
+
 jobs:
   cedar-validate:
     # Cedar drops a policy that errors at evaluation time (e.g. a context
@@ -28,14 +31,30 @@ jobs:
         with:
           persist-credentials: false
 
+      # Building the cedar CLI from source takes about two minutes, so the
+      # binary is cached by version and only rebuilt when that changes.
+      - name: Restore the cedar CLI
+        id: cedar-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cedar
+          key: cedar-policy-cli-${{ env.CEDAR_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
       # Pinned to a commit, the toolchain has to be named explicitly - the
       # `@stable` ref used to select it.
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable, 2026-10
+      - if: steps.cedar-cache.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable, 2026-10
         with:
           toolchain: stable
 
       - name: Install cedar CLI
-        run: cargo install cedar-policy-cli --version 4.12.0 --locked
+        if: steps.cedar-cache.outputs.cache-hit != 'true'
+        run: cargo install cedar-policy-cli --version "$CEDAR_VERSION" --locked
+
+      - name: Put the cedar CLI on PATH
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/cedar" --version
 
       - name: cedar validate
         run: |
@@ -54,19 +73,36 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Pinned to a commit, the toolchain has to be named explicitly - the
-      # `@stable` ref used to select it.
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable, 2026-10
+      # Same cache as cedar-validate: the test suite shells out to the real
+      # `cedar` binary via guard/authorize.py - it isn't mocked.
+      - name: Restore the cedar CLI
+        id: cedar-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cedar
+          key: cedar-policy-cli-${{ env.CEDAR_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      - if: steps.cedar-cache.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable, 2026-10
         with:
           toolchain: stable
 
       - name: Install cedar CLI
-        # The test suite shells out to the real `cedar` binary via
-        # guard/authorize.py - it isn't mocked.
-        run: cargo install cedar-policy-cli --version 4.12.0 --locked
+        if: steps.cedar-cache.outputs.cache-hit != 'true'
+        run: cargo install cedar-policy-cli --version "$CEDAR_VERSION" --locked
+
+      - name: Put the cedar CLI on PATH
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/cedar" --version
 
       - name: Install test dependencies
         run: pip install -r requirements-dev.txt
 
       - name: pytest
-        run: pytest tests/ -v
+        env:
+          # tests/conftest.py skips the cedar tests when the CLI is missing,
+          # which is right on a laptop without Rust but would make a broken
+          # install pass here. This makes it an error instead.
+          ACCRUE_REQUIRE_CEDAR: "1"
+        run: pytest tests/ -v --cov=guard --cov=dashboard --cov-report=term-missing
