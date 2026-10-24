@@ -394,9 +394,11 @@ def _response(event_id, decision, rule, context):
     }
 
 
-def _decide(context, policy_path):
+def _decide(context, policy_path, outcomes=None):
     """Ask Cedar about one payment. Returns ("ALLOW" | "DENY" | "HOLD", rule).
-    Anything that stops Cedar from answering cleanly is a HOLD."""
+    Anything that stops Cedar from answering cleanly is a HOLD. `outcomes`
+    replaces RULE_OUTCOMES (guard/replay.py passes a draft's)."""
+    outcomes = RULE_OUTCOMES if outcomes is None else outcomes
     try:
         decision, fired = _run_cedar(
             _entity_uid("Person", context["person"]),
@@ -412,9 +414,9 @@ def _decide(context, policy_path):
     if decision == "ALLOW":
         return "ALLOW", None
 
-    order = list(RULE_OUTCOMES)
+    order = list(outcomes)
     fired = sorted(fired, key=lambda r: order.index(r) if r in order else -1)
-    denies = [r for r in fired if RULE_OUTCOMES.get(r, "deny") == "deny"]
+    denies = [r for r in fired if outcomes.get(r, "deny") == "deny"]
     if denies:
         return "DENY", denies[0]
     if fired:
