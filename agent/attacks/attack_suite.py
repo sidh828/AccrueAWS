@@ -102,7 +102,11 @@ def run_suite(real_guard: bool = False) -> dict[str, dict[str, Outcome]]:
             else:
                 env = None
                 try:
-                    env = make_env(key, real_guard=real_guard and key == "ours")
+                    env = (
+                        make_env(key, real_guard=True)
+                        if real_guard and key == "ours"
+                        else make_env(key)
+                    )
                     outcome = atk.run(env)
                     if key == "ours" and real_guard:
                         outcome = Outcome(
