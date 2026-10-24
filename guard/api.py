@@ -82,6 +82,30 @@ UNAVAILABLE = {"decision": "hold", "rule": authorize.GUARD_UNAVAILABLE,
                "needs_approval": True, "event_id": None}
 
 
+def answer_authorize(open_ledger, body, sessions, now=None):
+    """POST /authorize's answer as (http_status, body), shared with
+    guard.local.LocalGuard so the in-process guard behaves exactly like the
+    server. `open_ledger()` returns a context manager yielding a
+    connection; `sessions` has is_tainted(session_id)."""
+    missing = [f for f in REQUIRED if f not in body]
+    if missing:
+        return 400, {"error": f"missing {', '.join(missing)}"}
+    kwargs = {f: body[f] for f in REQUIRED + OPTIONAL if f in body}
+    session_id = body["session_id"]
+    kwargs["tainted"] = body.get("tainted") is True or (
+        isinstance(session_id, str) and sessions.is_tainted(session_id)
+    )
+    try:
+        with open_ledger() as conn:
+            return 200, authorize.authorize_payment(conn, now=now, **kwargs)
+    except ValueError as err:
+        return 400, {"error": str(err)}
+    except sqlite3.Error as err:
+        return 503, {**UNAVAILABLE, "error": f"the ledger failed: {err}"}
+    except Exception as err:  # anything else unexpected: still a hold
+        return 503, {**UNAVAILABLE, "error": f"the guard failed: {err!r}"}
+
+
 def payment_view(conn, event_id):
     """One payment as the dashboard sees it: the ledger row, or - if a later
     row approved or denied it - that row's decision, status and rule under
@@ -193,25 +217,10 @@ class Handler(BaseHTTPRequestHandler):
         return self._override(body)
 
     def _authorize(self, body):
-        missing = [f for f in REQUIRED if f not in body]
-        if missing:
-            return self._json(400, {"error": f"missing {', '.join(missing)}"})
-        kwargs = {f: body[f] for f in REQUIRED + OPTIONAL if f in body}
-        session_id = body["session_id"]
-        kwargs["tainted"] = body.get("tainted") is True or (
-            isinstance(session_id, str) and self.sessions.is_tainted(session_id)
-        )
-        try:
-            with self._ledger() as conn:
-                response = authorize.authorize_payment(conn, **kwargs)
-        except ValueError as err:
-            return self._json(400, {"error": str(err)})
-        except sqlite3.Error as err:
-            return self._json(503, {**UNAVAILABLE, "error": f"the ledger failed: {err}"})
-        except Exception as err:  # anything else unexpected: still a hold
-            return self._json(503, {**UNAVAILABLE, "error": f"the guard failed: {err!r}"})
-        self._wake_streams()
-        self._json(200, response)
+        status, response = answer_authorize(self._ledger, body, self.sessions)
+        if status == 200:
+            self._wake_streams()
+        self._json(status, response)
 
     def _inbound(self, body):
         if not _strings(body, "session_id", "source", "content") or not body["session_id"]:
