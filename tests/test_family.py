@@ -15,6 +15,9 @@ import pytest
 
 from guard import authorize, ledger
 
+# Every test here runs the cedar CLI: skipped without it (tests/conftest.py).
+pytestmark = pytest.mark.cedar
+
 BILLS = ["mom", "bills-agent"]
 
 
