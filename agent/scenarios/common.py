@@ -60,7 +60,7 @@ class ScenarioResult:
     def record(self, amount_cents: int, resp: dict) -> None:
         self.attempts += 1
         self.attempted_cents += amount_cents
-        self.rules[resp.get("rule", "?")] += 1
+        self.rules[resp.get("rule") or "ok"] += 1
         if resp.get("ok"):
             self.allowed += 1
             self.through_cents += amount_cents

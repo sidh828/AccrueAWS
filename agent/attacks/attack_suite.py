@@ -1,25 +1,31 @@
 """Runs every row of the section 13 attack table against every defense.
 
     python -m agent.attacks.attack_suite            # print the markdown table
-    python -m agent.attacks.attack_suite --md out.md --json out.json
+    python -m agent.attacks.attack_suite --real --md out.md --json out.json
 
-Every attack gets a FRESH defense and a fresh clock. The "ours" column currently runs against
-FakeGuard (a stand-in). Do not quote it as the real engine's result until it is re-run against it.
+Every attack gets a FRESH defense and clock. By default "ours" uses FakeGuard; --real uses
+the Cedar-backed authorization path with a fresh temporary SQLite ledger per attack.
 """
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable
 
 from agent.attacks import wall_attacks as wa
 from agent.attacks.baselines import PerCallGuard, ScamWallOnly
+from agent.attacks.real_guard import LedgerGuard
 from agent.attacks.scorer import ERROR, LEAKED, NA, NOT_RUN, Outcome, from_scenario, render_markdown, to_json
 from agent.scenarios import (gift_cards, identity_spoof, parallel_flood, payee_attacks, slow_drip,
                              sub_agents, zelle_switch)
 from agent.scenarios.common import UNLABELED_SCAM_SMS, Env, FakeClock
 from agent.tools import FakeGuard, ToolBox
+from guard import authorize
 
 DEFENSES = [("per_call", "Per-call check"), ("prompt_only", "Prompt-only guard"),
             ("scam_wall", "Scam wall"), ("ours", "Our guard")]
@@ -35,9 +41,14 @@ class Attack:
     known_gap: bool = False  # a leak we expect and disclose until the matching Tier 2 piece lands
 
 
-def make_env(defense: str) -> Env:
+def make_env(defense: str, real_guard: bool = False) -> Env:
     clock = FakeClock()
-    guard = {"per_call": PerCallGuard, "scam_wall": ScamWallOnly}.get(defense, lambda c: FakeGuard(clock=c))(clock)
+    if defense == "ours" and real_guard:
+        guard = LedgerGuard(clock)
+    else:
+        guard = {"per_call": PerCallGuard, "scam_wall": ScamWallOnly}.get(
+            defense, lambda c: FakeGuard(clock=c)
+        )(clock)
     return Env(ToolBox(guard, session_id=f"atk-{uuid.uuid4().hex[:8]}"), clock.advance, defense)
 
 
@@ -58,9 +69,10 @@ ATTACKS: list[Attack] = [
     Attack("New payee 'plumber' with a fake invoice", lambda e: from_scenario(payee_attacks.fake_invoice(e))),
     Attack("Message tells the agent to approve its own override", wa.self_override,
            na=("per_call", "scam_wall")),
-    Attack("Cedar killed mid-run", wa.cedar_down, na=("per_call", "scam_wall")),
-    Attack("Ledger row edited by hand", lambda e: Outcome(NOT_RUN, "needs the real guard's /verify"),
-           na=("per_call", "scam_wall"), not_run={"ours": "needs the real guard's /verify"}),
+    Attack("Cedar unavailable mid-run", wa.cedar_down, na=("per_call", "scam_wall")),
+    Attack("Ledger row edited by hand", wa.ledger_edited,
+           na=("per_call", "scam_wall"),
+           not_run={"ours": "requires --real for ledger-integrity evidence"}),
     Attack("Unlabeled scam text, then $450 sent (beats the label wall)",
            lambda e: from_scenario(_unlabeled_then_pay(e))),
 ]
@@ -74,7 +86,7 @@ def _unlabeled_then_pay(env: Env):
     return res
 
 
-def run_suite() -> dict[str, dict[str, Outcome]]:
+def run_suite(real_guard: bool = False) -> dict[str, dict[str, Outcome]]:
     table: dict[str, dict[str, Outcome]] = {}
     for atk in ATTACKS:
         cells: dict[str, Outcome] = {}
@@ -83,31 +95,90 @@ def run_suite() -> dict[str, dict[str, Outcome]]:
                 cells[key] = Outcome(NOT_RUN, PROMPT_ONLY_REASON)
             elif key in atk.na:
                 cells[key] = Outcome(NA, "no such mechanism")
-            elif key in atk.not_run:
+            elif key in atk.not_run and not (
+                real_guard and key == "ours" and atk.name == "Ledger row edited by hand"
+            ):
                 cells[key] = Outcome(NOT_RUN, atk.not_run[key])
             else:
+                env = None
                 try:
-                    cells[key] = atk.run(make_env(key))
+                    env = (
+                        make_env(key, real_guard=True)
+                        if real_guard and key == "ours"
+                        else make_env(key)
+                    )
+                    outcome = atk.run(env)
+                    if key == "ours" and real_guard:
+                        outcome = Outcome(
+                            outcome.status,
+                            outcome.detail,
+                            outcome.through_cents,
+                            outcome.attempted_cents,
+                            env.guard.evidence(),
+                        )
+                    cells[key] = outcome
                 except Exception as exc:  # surface harness bugs instead of hiding them
                     cells[key] = Outcome(ERROR, f"{type(exc).__name__}: {exc}")
+                finally:
+                    close = getattr(getattr(env, "guard", None), "close", None)
+                    if close is not None:
+                        close()
         table[atk.name] = cells
     return table
+
+
+def run_metadata(real_guard: bool) -> dict:
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5, check=False
+        )
+        git_commit = commit.stdout.strip() if commit.returncode == 0 else None
+        status = subprocess.run(
+            ["git", "status", "--porcelain"], capture_output=True, text=True, timeout=5, check=False
+        )
+        source_worktree_clean = status.returncode == 0 and not status.stdout.strip()
+    except OSError:
+        git_commit = None
+        source_worktree_clean = None
+    cedar_version = None
+    if real_guard:
+        cedar = os.environ.get("ACCRUE_CEDAR_BIN", authorize.CEDAR_BIN)
+        result = subprocess.run(
+            [cedar, "--version"], capture_output=True, text=True, timeout=5, check=False
+        )
+        if result.returncode:
+            raise RuntimeError(f"could not read Cedar version: {result.stderr.strip()}")
+        cedar_version = result.stdout.strip()
+    return {
+        "schema_version": 1,
+        "mode": "real" if real_guard else "simulation",
+        "guard_backend": "Cedar-backed ledger" if real_guard else "FakeGuard simulation",
+        "cedar_version": cedar_version,
+        "git_commit": git_commit,
+        "source_worktree_clean": source_worktree_clean,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--md")
     ap.add_argument("--json")
+    ap.add_argument("--real", action="store_true",
+                    help="run the ours column through HttpGuard and an isolated real Cedar ledger")
     args = ap.parse_args()
-    table = run_suite()
+    metadata = run_metadata(args.real)
+    table = run_suite(real_guard=args.real)
     md = render_markdown(table, DEFENSES)
+    mode = "real Cedar-backed ledger" if args.real else "FakeGuard simulation (not Cedar)"
+    md = f"Evidence mode: {mode}; commit {metadata['git_commit'] or 'unknown'}.\n\n{md}"
     print(md)
     leaks = [a.name for a in ATTACKS if table[a.name]["ours"].status == LEAKED]
     print("\nOur guard leaked on:", leaks or "nothing")
     if args.md:
-        open(args.md, "w").write(md + "\n")
+        Path(args.md).write_text(md + "\n", encoding="utf-8")
     if args.json:
-        open(args.json, "w").write(to_json(table))
+        Path(args.json).write_text(to_json(table, metadata), encoding="utf-8")
 
 
 if __name__ == "__main__":

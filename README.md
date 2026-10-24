@@ -39,22 +39,38 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 # budget. The first is allowed, the rest are denied.
 .venv/bin/python -m guard.main
 
-# the live guard API (agent tools call /authorize, /inbound and /outbound):
-# classify pay_bill requests as utility or rent to apply the known-bill rule;
-# the default bill category is treated as a general payment.
-# generate ACCRUE_WALL_KEY once (at least 32 bytes), store it securely outside
-# the database, and keep it stable across restarts. Set ACCRUE_ALLOWED_CONTACTS
-# to a comma-separated trusted-recipient list before starting the server.
+# the live guard API (agent tools call /authorize, /inbound and /outbound;
+# the dashboard reads /events and /stream and approves through /override).
+# It prints the dashboard links. The agent should classify pay_bill as utility
+# or rent so the known-bill rule applies; plain "bill" is a general payment.
+# Keys, generated once and kept stable and
+# outside the database:
+#   ACCRUE_WALL_KEY     keys the walls' stored code digests (32+ bytes); without
+#                       it, taint and received codes are forgotten on restart
+#   ACCRUE_LEDGER_KEY   keys the ledger's hash chain
+#   ACCRUE_DASHBOARD_TOKEN  the dashboard's secret for approving (else made up)
+#   ACCRUE_ALLOWED_CONTACTS comma-separated recipients /outbound always allows
+#   ACCRUE_TOKEN_KEY    verifies agents' signed delegation tokens; with
+#   ACCRUE_REQUIRE_TOKENS=1 a request without a valid token is refused.
+#   Mint one for the agent:  ACCRUE_TOKEN_KEY=... python3 -m guard.tokens mint \
+#                              --person mom --agent bills-agent --day 50000
+#   A sub-agent narrows it (no key needed): python3 -m guard.tokens narrow TOKEN \
+#                              --agent giftcard-subagent --day 10000 --tools buy_gift_card
 # Generate a key with: python3 -c "import secrets; print(secrets.token_urlsafe(48))"
-# .venv/bin/uvicorn --factory guard.api:create_app --host 127.0.0.1 --port 8000
-# Taint and keyed verification-code digests persist in the guard SQLite database.
+.venv/bin/python -m guard.api --db ledger.db
 # Password-vault entries are still in memory and must be loaded at startup.
 
-# the family dashboard against a stand-in API:
+# optional stand-in dashboard/API for a demo without the real guard:
 # It prints two links: the one ending in #token=... can approve payments
 # (open it once on each device that should), the other is read-only.
 python3 dashboard/fake_api.py
 python3 dashboard/alerts.py --dry-run   # phone alerts, printed instead of sent
+
+# attack-suite comparison; --real sends agent requests through HttpGuard to a
+# local real API backed by Cedar and an isolated ledger.
+# The JSON report records the mode, Cedar version, source commit, ledger head,
+# and verification result for each real-guard attack.
+python3 -m agent.attacks.attack_suite --real --md attack-results.md --json attack-results.json
 ```
 
 ## Layout

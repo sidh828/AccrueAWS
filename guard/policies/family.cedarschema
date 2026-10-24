@@ -13,26 +13,40 @@ action pay appliesTo {
     context: {
         // This request.
         amount: Long,
+        tool: String,
         is_gift_card: Bool,
         // The session saw untrusted text or an AI scam label: the stricter
         // column of the spending rules applies.
         tainted: Bool,
-        // Allowed in the last 24 hours, including this request.
+        // Allowed in the last 24 hours, including this request, leaving out
+        // known bills.
         day_total: Long,
         gift_card_day_total: Long,
         // Nothing has ever been allowed to this payee for this person.
         new_payee: Bool,
+        // Not new, but first paid within the last 30 days.
+        recent_payee: Bool,
+        // Allowed in the last 30 days to payees first paid within those 30
+        // days, including this request if it's to a new or recent payee.
+        recent_payees_total: Long,
         // A utility or rent payee paid within the last 45 days, and the
         // last amount paid to it.
         known_bill: Bool,
         last_bill: Long,
         // Denials in the last 10 minutes since the last breaker override.
         recent_denials: Long,
+        // From the agent's delegation token (guard/tokens.py): the tools it
+        // was granted, and the least any of its branch budgets has left in
+        // 24 hours. Without a token: every tool, and no budget.
+        delegated_tools: Set<String>,
+        delegation_headroom: Long,
         limits: {
             day: Long,
             day_flagged: Long,
             gift_card_day: Long,
             new_payee_first: Long,
+            recent_payees: Long,
+            recent_payees_flagged: Long,
             breaker_denials: Long,
             breaker_denials_flagged: Long,
         },
