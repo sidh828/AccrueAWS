@@ -29,9 +29,11 @@ from . import api, authorize, ledger
 
 
 class LocalGuard:
-    def __init__(self, db_path=None, clock=time.time, contacts=None):
+    def __init__(self, db_path=None, clock=time.time, contacts=None, token_key=None,
+                 require_token=False):
         self.clock = clock
         self.fault = None  # e.g. "cedar killed": Cedar can't be reached while it's set
+        self.token_key, self.require_token = token_key, require_token
         # A file, not ":memory:": the suite calls from many threads at once,
         # and each call gets its own connection, as in the server - so
         # parallel requests really do race for the ledger's write lock.
@@ -56,8 +58,11 @@ class LocalGuard:
     def authorize(self, req):
         now = datetime.fromtimestamp(self.clock(), tz=timezone.utc)
         with self._cedar():
-            status, body = api.answer_authorize(self._ledger, req, self.sessions, now=now)
-        return body if status in (200, 503) else {**api.UNAVAILABLE, "error": body["error"]}
+            status, body = api.answer_authorize(self._ledger, req, self.sessions, now=now,
+                                                token_key=self.token_key,
+                                                require_token=self.require_token)
+        return body if status in (200, 503) else {**api.UNAVAILABLE, "rule": "refused",
+                                                    "error": body["error"]}
 
     def inbound(self, session_id, source, content):
         return self._inbound.ingest(session_id, source, content).to_contract()

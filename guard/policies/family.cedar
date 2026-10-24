@@ -92,3 +92,15 @@ when {
          then context.limits.breaker_denials_flagged
          else context.limits.breaker_denials)
 };
+
+// Delegation (guard/tokens.py): a sub-agent's signed token can only narrow
+// what its parent had. A tool the token doesn't grant, or more than the
+// tightest branch budget left in 24 hours, is stopped. Without a token,
+// every tool is granted and there's no branch budget.
+@id("delegation_tool")
+forbid (principal, action == Action::"pay", resource)
+when { !context.delegated_tools.contains(context.tool) };
+
+@id("delegation_budget")
+forbid (principal, action == Action::"pay", resource)
+when { context.amount > context.delegation_headroom };

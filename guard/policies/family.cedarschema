@@ -13,6 +13,7 @@ action pay appliesTo {
     context: {
         // This request.
         amount: Long,
+        tool: String,
         is_gift_card: Bool,
         // The session saw untrusted text or an AI scam label: the stricter
         // column of the spending rules applies.
@@ -34,6 +35,11 @@ action pay appliesTo {
         last_bill: Long,
         // Denials in the last 10 minutes since the last breaker override.
         recent_denials: Long,
+        // From the agent's delegation token (guard/tokens.py): the tools it
+        // was granted, and the least any of its branch budgets has left in
+        // 24 hours. Without a token: every tool, and no budget.
+        delegated_tools: Set<String>,
+        delegation_headroom: Long,
         limits: {
             day: Long,
             day_flagged: Long,
