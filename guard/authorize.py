@@ -398,7 +398,7 @@ def _decide(context, policy_path):
 
 def authorize_payment(conn, *, person, chain, tool, amount_cents, payee, category,
                       session_id, request_id=None, reason=None, tainted=False,
-                      policy_path=None):
+                      policy_path=None, now=None):
     """Ask "can Mom's agent make this payment?" under the family's spending
     rules, log the answer, and return CLAUDE.md's /authorize response:
     decision ("allow", "deny" or "hold"), the rule that decided it, the
@@ -416,6 +416,9 @@ def authorize_payment(conn, *, person, chain, tool, amount_cents, payee, categor
     as a hold (rule "guard_unavailable") rather than raising, so it waits
     for the family. A database error still raises, and the caller must treat
     that as a hold too. Malformed input raises ValueError and logs nothing.
+
+    `now` (a timezone-aware datetime) replaces the clock, for replaying a
+    simulated month (guard/sim.py). The API never passes it.
     """
     if type(amount_cents) is not int or not 0 <= amount_cents <= MAX_AMOUNT_CENTS:
         raise ValueError(
@@ -457,7 +460,7 @@ def authorize_payment(conn, *, person, chain, tool, amount_cents, payee, categor
                 return _response(event["id"], event["decision"], event["rule"],
                                  event["context"])
 
-        now = datetime.now(timezone.utc)
+        now = now or datetime.now(timezone.utc)
         day_since = ledger.utc_timestamp(now - BUDGET_WINDOW)
         is_gift_card = category == "gift_card"
         last_bill = None
@@ -498,7 +501,7 @@ def authorize_payment(conn, *, person, chain, tool, amount_cents, payee, categor
         raise
 
 
-def resolve(conn, event_id, action, authorized_by):
+def resolve(conn, event_id, action, authorized_by, now=None):
     """The family settles a held payment: `action` is "approve" or "deny".
     Appends a row that resolves the held one and returns its event_id; the
     held row never changes. An approval counts toward the totals from now,
@@ -506,6 +509,7 @@ def resolve(conn, event_id, action, authorized_by):
     hold can be resolved, and only once.
 
     This is POST /override's job. The agent must never be able to call it.
+    `now` replaces the clock, as in authorize_payment.
     """
     if action not in ("approve", "deny"):
         raise ValueError(f"action must be 'approve' or 'deny', got {action!r}")
@@ -522,7 +526,7 @@ def resolve(conn, event_id, action, authorized_by):
 
         approved = action == "approve"
         new_id = ledger.insert_event(
-            conn, ledger.utc_timestamp(), held["session_id"], held["action"],
+            conn, ledger.utc_timestamp(now), held["session_id"], held["action"],
             held["resource"], held["amount_cents"], "ALLOW" if approved else "DENY",
             scope_id=held["scope_id"], resolves=event_id, payee=held["payee"],
             category=held["category"], tool=held["tool"], chain=held["chain"],
