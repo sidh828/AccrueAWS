@@ -34,9 +34,10 @@ def pay(conn, amount, payee="grocer.example", category="groceries", tainted=Fals
     )
 
 
-def paid_before(conn, payee, amount=100, category="groceries", days_ago=2):
-    """Log an allowed payment from before today's window, so `payee` isn't
-    new and today's totals start at zero."""
+def paid_before(conn, payee, amount=100, category="groceries", days_ago=60):
+    """Log an allowed payment from well before today, so `payee` is someone
+    Margaret has paid for a while - not new, not recent (first paid more
+    than 30 days ago) - and today's totals start at zero."""
     when = datetime.now(timezone.utc) - timedelta(days=days_ago)
     ledger.insert_event(
         conn, ledger.utc_timestamp(when), "sess-0", "pay", payee, amount, "ALLOW",
@@ -76,16 +77,23 @@ def test_daily_cap_is_500(conn):
     assert outcome(response) == ("allow", None)
     assert response["totals"]["day"] == 50_000 and response["limits"]["day"] == 50_000
 
+    # Over the line to someone she has paid before: it waits for the family,
+    # who can approve it (a deny can't be).
     response = pay(conn, 1)
+    assert outcome(response) == ("hold", "daily_cap_needs_approval")
+    assert response["totals"]["day"] == 50_001 and response["needs_approval"] is True
+
+    # Over the line to someone new: stopped. That's what stops a bail wire.
+    response = pay(conn, 100, "atty-r-mendez.example", "transfer")
     assert outcome(response) == ("deny", "daily_cap")
-    assert response["totals"]["day"] == 50_001 and response["needs_approval"] is False
+    assert response["needs_approval"] is False
 
 
 def test_daily_cap_is_100_after_a_scam_flag(conn):
     paid_before(conn, "grocer.example")
     assert outcome(pay(conn, 10_000, tainted=True)) == ("allow", None)
     response = pay(conn, 1, tainted=True)
-    assert outcome(response) == ("deny", "daily_cap")
+    assert outcome(response) == ("hold", "daily_cap_needs_approval")
     assert response["limits"]["day"] == 10_000
 
 
@@ -128,11 +136,24 @@ def test_known_bills_can_rise_20_percent_and_are_exempt_from_the_daily_cap(conn)
     assert outcome(pay(conn, 14_400, "ohio-power.example", "utility")) == ("allow", None)
 
     paid_before(conn, "landlord.example", 120_000, "rent", days_ago=31)
-    assert outcome(pay(conn, 120_000, "landlord.example", "rent")) == ("allow", None)
-    # The rent is over $500 on its own and went through, but it still counts:
-    # the day's total is spent.
+    response = pay(conn, 120_000, "landlord.example", "rent")
+    assert outcome(response) == ("allow", None)
+    # The rent is over $500 on its own and went through, and as a known bill
+    # it's left out of the day's total: groceries on rent day still work.
+    assert response["totals"]["day"] == 0
     paid_before(conn, "grocer.example")
-    assert outcome(pay(conn, 100)) == ("deny", "daily_cap")
+    assert outcome(pay(conn, 8_000)) == ("allow", None)
+
+
+def test_a_new_payee_calling_itself_a_utility_is_not_a_known_bill(conn):
+    """The category comes from the agent, so it can't be what exempts a
+    payment from the day's total: a scam payee labelled "utility" that
+    Margaret has never paid is counted and capped like anything else."""
+    paid_before(conn, "grocer.example")
+    assert outcome(pay(conn, 45_000)) == ("allow", None)
+    response = pay(conn, 19_000, "aep-ohio-billing.example", "utility")
+    assert outcome(response) == ("deny", "daily_cap")
+    assert response["totals"]["day"] == 64_000
 
 
 def test_three_denials_in_ten_minutes_hold_everything(conn):
@@ -165,6 +186,45 @@ def test_a_deny_beats_a_hold(conn):
     assert outcome(response) == ("deny", "daily_cap")
 
 
+def test_recent_payees_are_capped_at_500_a_month_together(conn):
+    """A patient drip - $150, then $250s every few days to someone she met
+    online - never crosses the day's limit. Once payments to people first
+    paid in the last 30 days pass $500 together, the next one waits for the
+    family. Spreading it over new "accounts" doesn't reset the count."""
+    now = datetime.now(timezone.utc)
+    for days_ago, payee, amount in [(12, "james-oduya-medic.example", 15_000),
+                                    (9, "james-oduya-medic.example", 25_000),
+                                    (6, "medic-family-fund.example", 9_000)]:
+        ledger.insert_event(conn, ledger.utc_timestamp(now - timedelta(days=days_ago)),
+                            "s0", "pay", payee, amount, "ALLOW", scope_id="mom/bills-agent",
+                            payee=payee, category="transfer")
+    conn.commit()
+    # $490 so far; $10 more is exactly $500.
+    assert outcome(pay(conn, 1_000, "james-oduya-medic.example", "transfer")) == ("allow", None)
+    response = pay(conn, 2_500, "medic-family-fund.example", "transfer")
+    assert outcome(response) == ("hold", "recent_payee_cap")
+    assert response["totals"]["recent_payees"] == 52_500
+    # Someone she has paid for months isn't affected.
+    paid_before(conn, "grocer.example")
+    assert outcome(pay(conn, 30_000)) == ("allow", None)
+
+
+def test_a_recent_payee_waits_after_a_scam_flag(conn):
+    paid_before(conn, "dr-patel.example", days_ago=10)
+    assert outcome(pay(conn, 4_000, "dr-patel.example", "medical", tainted=True)) == (
+        "hold", "recent_payee_cap")
+
+
+def test_payments_to_new_and_recent_payees_carry_a_notice(conn):
+    """No rule stopped them, but the family should still hear about them."""
+    paid_before(conn, "grocer.example")
+    pay(conn, 5_000)
+    pay(conn, 4_000, "dr-patel.example", "medical")
+    pay(conn, 3_000, "dr-patel.example", "medical")
+    rows = ledger.contract_rows(conn)
+    assert [r["notice"] for r in rows[1:]] == [None, "new_payee", "recent_payee"]
+
+
 # --- Holds and the family's answer ---------------------------------------------
 
 def test_a_held_payment_counts_only_once_approved(conn):
@@ -173,18 +233,21 @@ def test_a_held_payment_counts_only_once_approved(conn):
     assert held["decision"] == "hold"
 
     # Not counted while it waits: the full $500 is still there.
-    assert outcome(pay(conn, 50_000)) == ("allow", None)
+    assert outcome(pay(conn, 45_000)) == ("allow", None)
 
     approval = authorize.resolve(conn, held["event_id"], "approve", "daughter")
     rows = ledger.contract_rows(conn)
     assert rows[-1]["event_id"] == approval and rows[-1]["resolves"] == held["event_id"]
     assert rows[-1]["status"] == "allowed"
+    assert outcome(pay(conn, 5_001, "giftcards.example", "gift_card")) == (
+        "deny", "gift_card_daily_cap")  # it still counts toward gift cards today
 
-    # Counted from the approval on - and it went through past the limit,
-    # because the family is the override.
-    response = pay(conn, 1)
-    assert outcome(response) == ("deny", "daily_cap")
-    assert response["totals"]["day"] == 55_001
+    # But it went through with the family's OK, so it doesn't use up the
+    # $500 for the rest of Mom's day: $50 of groceries still fits.
+    response = pay(conn, 5_000)
+    assert outcome(response) == ("allow", None)
+    assert response["totals"]["day"] == 50_000
+    assert outcome(pay(conn, 1)) == ("hold", "daily_cap_needs_approval")
 
 
 def test_a_denied_hold_never_counts(conn):
@@ -259,7 +322,7 @@ def test_event_rows_have_the_contract_fields(conn):
     authorize.resolve(conn, held["event_id"], "approve", "daughter")
 
     rows = ledger.contract_rows(conn)
-    assert all(set(r) == contract | {"resolves"} for r in rows)
+    assert all(set(r) == contract | {"resolves", "notice", "known_bill"} for r in rows)
     assert [(r["decision"], r["status"]) for r in rows[1:]] == [
         ("allow", "allowed"), ("deny", "released"), ("hold", "held"), ("allow", "allowed")]
     assert rows[1]["chain"] == ["mom", "bills-agent", "giftcard-subagent"]

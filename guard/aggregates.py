@@ -157,3 +157,53 @@ def denials_since(conn, home, since):
         (home, since, home),
     ).fetchone()
     return row[0]
+
+
+def day_total_for_limit(conn, home, since):
+    """What counts toward the day's limit: allowed at or after `since`,
+    leaving out two kinds of payment.
+
+    - Known bills: rent and utilities the guard recognized as within their
+      usual amount when they were paid (their logged context says
+      known_bill). That comes from the guard's own check, never from the
+      category the agent sent, so a scam paid to a new payee labelled
+      "utility" still counts.
+    - Payments the family approved (rows that resolve a hold). They went
+      through with her OK, so they don't use up the $500 Mom has for
+      groceries the same day.
+    """
+    row = conn.execute(
+        "SELECT COALESCE(SUM(amount_cents), 0) FROM events "
+        "WHERE home = ? AND decision = 'ALLOW' AND timestamp >= ? AND resolves IS NULL "
+        "AND COALESCE(json_extract(context, '$.known_bill'), 0) = 0",
+        (normalize_scope(home), since),
+    ).fetchone()
+    return row[0]
+
+
+def first_paid(conn, home, payee):
+    """When anything was first allowed from this person to this payee, or
+    None."""
+    row = conn.execute(
+        "SELECT MIN(timestamp) FROM events WHERE home = ? AND payee = ? AND decision = 'ALLOW'",
+        (normalize_scope(home), payee),
+    ).fetchone()
+    return row[0]
+
+
+def recent_payees_total(conn, home, since):
+    """Allowed at or after `since` to payees whose first allowed payment was
+    also at or after `since`: what's gone to people Margaret has only
+    started paying. All such payees together, so spreading a scam over
+    several new "accounts" doesn't reset it."""
+    home = normalize_scope(home)
+    row = conn.execute(
+        "SELECT COALESCE(SUM(e.amount_cents), 0) FROM events e "
+        "WHERE e.home = ? AND e.decision = 'ALLOW' AND e.timestamp >= ? "
+        "AND e.payee IS NOT NULL AND ("
+        "    SELECT MIN(f.timestamp) FROM events f "
+        "    WHERE f.home = e.home AND f.payee = e.payee AND f.decision = 'ALLOW'"
+        ") >= ?",
+        (home, since, since),
+    ).fetchone()
+    return row[0]
