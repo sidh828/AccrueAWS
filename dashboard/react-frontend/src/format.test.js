@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { asPercent, limitsFrom, money, summarize } from './format.js';
+import { asPercent, limitsFrom, money, proofFrom, summarize } from './format.js';
 
 test('money uses integer cents and displays two decimal places', () => {
   assert.equal(money(0), '$0.00');
@@ -46,4 +46,17 @@ test('limits come from GET /limits, with the plan values as a fallback', () => {
   assert.deepEqual(limitsFrom({ normal: { day: 40000, gift_card_day: 5000 } }), { day: 40000, gift_card_day: 5000 });
   assert.deepEqual(limitsFrom(null), { day: 50000, gift_card_day: 10000 });
   assert.deepEqual(limitsFrom({ normal: { day: '1' } }), { day: 50000, gift_card_day: 10000 });
+});
+
+test('the proof panel reads /verify in plain words', () => {
+  assert.equal(proofFrom(null).state, 'unknown');
+  const ok = proofFrom({ ok: true, first_bad_event_id: null, first_bad_override_id: null, head: { event_id: 9, row_hash: 'abcdef0123456789' } });
+  assert.equal(ok.state, 'ok');
+  assert.equal(ok.fingerprint, 'abcdef012345');
+  assert.match(ok.detail, /#9/);
+  const broken = proofFrom({ ok: false, first_bad_event_id: 4, first_bad_override_id: null, head: null });
+  assert.equal(broken.state, 'broken');
+  assert.match(broken.detail, /Payment record #4/);
+  assert.match(proofFrom({ ok: false, first_bad_event_id: null, first_bad_override_id: 2 }).detail, /Approval record #2/);
+  for (const view of [ok, broken]) assert.doesNotMatch(`${view.title} ${view.detail}`, /ledger|hash|cedar/i);
 });

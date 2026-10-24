@@ -661,3 +661,10 @@ h1,h2,h3 { font-family: 'Manrope', 'DM Sans', sans-serif; letter-spacing: -.035e
     flex-direction: column;
   }
 }
+.proof-body { padding: 18px 22px 20px; display: grid; gap: 8px; }
+.proof-status { display: flex; align-items: center; gap: 10px; font-size: 16px; }
+.proof-ok .proof-status { color: #1f7a4d; }
+.proof-broken { border-color: #e8b4b0; background: #fff6f5; }
+.proof-broken .proof-status { color: #b3261e; }
+.proof-unknown .proof-status { color: var(--muted); }
+.proof code { font-size: 12px; background: #eef1f3; padding: 1px 5px; border-radius: 4px; }

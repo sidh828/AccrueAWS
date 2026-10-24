@@ -1,12 +1,13 @@
 import SecurityDemo from './components/SecurityDemo.jsx';
 import { useMemo, useState } from 'react';
 import { Activity, ArrowRight, CheckCircle2, CircleAlert, CreditCard, LayoutDashboard, LockKeyhole, ShieldCheck, ShieldX, WifiOff } from 'lucide-react';
-import { useGuardEvents } from './api.js';
+import { useGuardEvents, useVerify } from './api.js';
 import { limitsFrom, money, summarize } from './format.js';
 import SpendingProgress from './components/SpendingProgress.jsx';
 import ApprovalQueue from './components/ApprovalQueue.jsx';
 import ActivityTimeline from './components/ActivityTimeline.jsx';
 import CategoryBreakdown from './components/CategoryBreakdown.jsx';
+import ProofPanel from './components/ProofPanel.jsx';
 
 const connectionLabels = {
   connecting: 'Connecting…',
@@ -36,6 +37,7 @@ function Sidebar({ view, setView }) {
 export default function App() {
   const {events, connection, error, busyId, override, runDemo, demoBusy, canRunDemo, limits: apiLimits } = useGuardEvents();
   const limits = useMemo(() => limitsFrom(apiLimits), [apiLimits]);
+  const proof = useVerify(events.length);
   const [view, setView] = useState('overview');
   const [filter, setFilter] = useState('all');
   const summary = useMemo(() => summarize(events), [events]);
@@ -69,7 +71,7 @@ export default function App() {
                 <div className="column-stack">
                   <section className="panel activity-panel"><div className="section-header"><div><div className="section-icon blue-icon"><Activity size={17}/></div><h3>Recent activity</h3></div><button className="text-link" onClick={() => setView('activity')}>View all <ArrowRight size={16}/></button></div><ActivityTimeline events={summary.today}/></section>
                 </div>
-                <div className="column-stack"><ApprovalQueue waiting={summary.waiting} processing={summary.processing} busyId={busyId} onOverride={override}/><CategoryBreakdown summary={summary} limits={limits}/></div>
+                <div className="column-stack"><ApprovalQueue waiting={summary.waiting} processing={summary.processing} busyId={busyId} onOverride={override}/><CategoryBreakdown summary={summary} limits={limits}/><ProofPanel result={proof.result} checkedAt={proof.checkedAt}/></div>
               </div>
             </>
           ) : view === 'demo' ? (
