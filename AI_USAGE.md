@@ -181,3 +181,99 @@ commits, and keep going on `guard/`.
 The rule-to-outcome table and the "new rows only" log were Claude's
 proposals. Dharvik adopted them pending the team's answer on #1. Siddh
 reviewed and merged #2.
+
+## Sat Oct 24, 1:05 PM to 3:30 PM: the rest of guard Tier 1, end to end (Dharvik, with Claude Code)
+
+**Asked:** Dharvik asked Claude Code (Claude Opus 5.5), one step at a time:
+- the hash chain, then the API
+- a more realistic test than the gift-card demo
+- fixes for the gaps that test found
+- then: land everything on `main`, wire it to Benji's agent and walls,
+  write `explain.py`, and this entry
+
+**What it did:**
+
+- **#11, the hash chain and `verify()`.** Each row hashes the one before
+  it. An edit, a deletion or an inserted row is named. An anchor kept
+  off the box, or `ACCRUE_LEDGER_KEY`, catches re-hashing after an edit.
+- **#13, `guard/api.py`.** The contract over HTTP, behaving like Siddh's
+  stand-in so the dashboard works unchanged.
+- **#14, `guard/sim.py`, Margaret's September.** A fictional 78-year-old's
+  real-looking month (six months of bank history, then September) with
+  eight real elder-fraud patterns that adapt when blocked, and a daughter
+  who acts on alerts. It found two gaps:
+  - a patient $250-every-3-days scam took $2,400 and was never noticed
+  - three of her own payments were denied, with no way to approve them
+- **#15, the gap fixes,** posted on issue #1 first:
+  - a $500-per-30-days cap on recently added payees
+  - `notice` FYIs for payments that went through to new payees
+  - known bills and family-approved payments left out of the day's total
+  - over the limit to a payee she has paid before is a hold, not a deny
+
+  Scam losses for the month went from $1,995 to $395. Her own payments
+  denied went from 3 to 0.
+- **#17 and #18, landing it all on `main`.**
+  - **One API with Benji's walls** (#16) inside, so `/inbound` and
+    `/outbound` share taint with `/authorize`.
+  - **The tool now decides which categories a payment can claim,** so a
+    gift card can't be labelled as groceries.
+  - **`guard/local.py`** runs the real guard in-process for Benji's
+    attack suite.
+  - **`tests/test_e2e.py`** runs that suite with "Our guard" on the real
+    engine, and the video's scam beat through the agent's tools over HTTP.
+- **#18, `guard/explain.py`.** A plain-English sentence for every
+  decision, built only from logged numbers, and a checker that rejects
+  any AI-written sentence whose numbers don't match.
+
+**How we checked:**
+
+- The suite went 97 → 110 → 114 → 220 → 234 → 240 passing. That includes
+  Benji's walls and attack suite, and the end-to-end tests over real HTTP
+  with the real Cedar CLI.
+- Against the real guard, Benji's attack suite has no errors and nothing
+  over $500. The only leak is the one his suite discloses as a known gap.
+- We ran the guard live with Mom's scam day and opened the real
+  dashboard in a browser. It showed "$350 of $500 spent today", with the
+  approved payment counted once.
+- Each gap was an `xfail(strict=True)` test before the fix and a plain
+  test after.
+- Measured: `verify()` takes about 14 ms over 2,000 rows, and `authorize`
+  stays at about 5 ms.
+
+**Mistakes, and what caught them:**
+
+- **#13 and #15 never reached `main`.** They were opened against stacked
+  branches that were merged before them, so they merged into dead
+  branches while showing "MERGED". Caught by checking `main`'s files
+  directly. #17 lands them, and all of Claude's PRs now target `main`.
+- **The live run reported the wrong rule** for a $450 gift card
+  (`daily_cap` rather than `gift_card_daily_cap`). Fixed, and tested.
+- **The first version of the explanation checker** accepted a real number
+  attached to the wrong thing ("about $500 in gift cards"). Its own test
+  caught it, and each rule now checks only its relevant numbers.
+- **Several test fixtures relied on assumptions the new rules changed,**
+  such as a "known" payee paid only 2 days earlier. They were updated,
+  and each change is explained in its commit.
+- **The simulation started with two months of history.** It was moved to
+  six, which a bank import would realistically have. That's disclosed in
+  #15, and it's the reason the car insurance isn't a first payment.
+
+**Rejected or changed:**
+
+- **FastAPI for the API:** not used. It came in with #16, but the
+  dashboard depends on the standard-library server's stream and token
+  rule.
+- **#16's mapping of every bill to "bill":** changed. It would have made
+  rent count against the $500 limit.
+- **An AI writer for explanations:** not wired yet. Only the template and
+  the checker run.
+
+**Human decisions (Dharvik):**
+
+- build the hash chain before the API
+- build the household simulation
+- fix both gaps it found
+- post the rule changes on #1 before coding
+- "do all of it" for landing, end to end and `explain.py`
+
+Benji merged #11 to #14, and Siddh merged #15.
