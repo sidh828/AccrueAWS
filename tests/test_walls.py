@@ -284,8 +284,9 @@ def test_totals_include_current_request_and_needs_approval_only_on_hold(tools):
     r = tools.buy_gift_card("giftcards.example", 45_000, "x")
     assert r["totals"] == {"day": 45_000, "gift_card_day": 45_000}
     assert r["decision"] == "deny" and r["needs_approval"] is False
-    h = tools.pay_bill("brand-new.example", 25_000, "x")   # new payee over $200 -> hold
-    assert h["decision"] == "hold" and h["needs_approval"] is True
+    denied = tools.pay_bill("brand-new.example", 25_000, "x")
+    assert denied["decision"] == "deny" and denied["rule"] == "new_payee_cap"
+    assert denied["needs_approval"] is False
 
 def test_held_and_denied_amounts_do_not_count(tools):
     tools.pay_bill("brand-new.example", 25_000, "held")

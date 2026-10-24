@@ -125,7 +125,7 @@ def test_authorize_endpoint_uses_taint_from_inbound_wall(client, monkeypatch):
             "tool": "pay_bill",
             "amount_cents": 100,
             "payee": "power-company.example",
-            "category": "bill",
+            "category": "utility",
             "reason": "monthly bill",
             "request_id": "request-1",
             "session_id": "session-1",
@@ -135,6 +135,7 @@ def test_authorize_endpoint_uses_taint_from_inbound_wall(client, monkeypatch):
     assert response.status_code == 200
     assert response.json()["decision"] == "hold"
     assert seen["tainted"] is True
+    assert seen["category"] == "utility"
 
 
 def test_authorize_endpoint_rejects_mismatched_tool_category(client):

@@ -12,19 +12,13 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from guard import authorize, ledger
+from guard.tool_contract import category_matches_tool
 from walls.inbound import InboundWall, SessionStore
 from walls.outbound import OutboundWall
 from walls.secrets import SecretStore
 from walls.storage import WallStateStore
 
 logger = logging.getLogger(__name__)
-
-TOOL_CATEGORIES = {
-    "pay_bill": "bill",
-    "buy_gift_card": "gift_card",
-    "send_zelle": "transfer",
-}
-
 
 class StrictRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -103,8 +97,7 @@ def create_app(
 
     @app.post("/authorize")
     def authorize_request(body: AuthorizeRequest, request: Request):
-        expected_category = TOOL_CATEGORIES.get(body.tool)
-        if expected_category is None or body.category != expected_category:
+        if not category_matches_tool(body.tool, body.category):
             raise HTTPException(status_code=422, detail="tool and category do not match")
 
         try:

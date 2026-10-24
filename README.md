@@ -40,6 +40,8 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m guard.main
 
 # the live guard API (agent tools call /authorize, /inbound and /outbound):
+# classify pay_bill requests as utility or rent to apply the known-bill rule;
+# the default bill category is treated as a general payment.
 # generate ACCRUE_WALL_KEY once (at least 32 bytes), store it securely outside
 # the database, and keep it stable across restarts. Set ACCRUE_ALLOWED_CONTACTS
 # to a comma-separated trusted-recipient list before starting the server.
