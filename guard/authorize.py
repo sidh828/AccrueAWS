@@ -317,13 +317,15 @@ FAMILY_LIMITS = {
 }
 
 # What each forbid in family.cedar does when it fires, in the order a rule
-# is reported when several fire. A deny beats a hold. A rule missing from
-# here is treated as a deny, so adding one to the policy can't fail open
+# is reported when several fire: a deny beats a hold, and within each the
+# most specific rule comes first, so a $450 gift card on a busy day is
+# "gift_card_daily_cap", not just "daily_cap". A rule missing from here is
+# treated as a deny, so adding one to the policy can't fail open
 # (tests/test_family.py checks the two stay in step).
 RULE_OUTCOMES = {
-    "daily_cap": "deny",
     "gift_card_daily_cap": "deny",
     "new_payee_cap": "deny",
+    "daily_cap": "deny",
     "breaker": "hold",
     "gift_card_needs_approval": "hold",
     "new_payee_needs_approval": "hold",
