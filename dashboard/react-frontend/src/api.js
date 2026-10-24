@@ -45,6 +45,7 @@ export function useGuardEvents() {
   const [error, setError] = useState('');
   const [busyId, setBusyId] = useState(null);
   const [demoBusy, setDemoBusy] = useState(null);
+  const [limits, setLimits] = useState(null); // GET /limits; null until it answers
   const alive = useRef(true);
 
   const mergeEvent = useCallback((event) => {
@@ -108,6 +109,10 @@ export function useGuardEvents() {
     }
 
     start();
+    fetch(`${API}/limits`, { cache: 'no-store' })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((body) => { if (!disposed && body) setLimits(body); })
+      .catch(() => { /* keep the fallback limits */ });
     return () => {
       disposed = true;
       alive.current = false;
@@ -192,5 +197,5 @@ export function useGuardEvents() {
   }
 
   const events = Object.values(rowsById).sort((a, b) => a.event_id - b.event_id);
-  return {events, connection, error, busyId, override, runDemo, demoBusy,canRunDemo: Boolean(dashboardToken),}; 
+  return {events, connection, error, busyId, override, runDemo, demoBusy,canRunDemo: Boolean(dashboardToken), limits };
 }
