@@ -5,7 +5,8 @@ Follows the guard's GET /events and pushes every newly stopped or held
 payment to ntfy (https://ntfy.sh). The phone runs the ntfy app, subscribed
 to the same topic.
 
-    NTFY_TOPIC=<topic> python3 dashboard/alerts.py --open http://<laptop-ip>:8000/
+    ACCRUE_DASHBOARD_TOKEN=<token> NTFY_TOPIC=<topic> python3 dashboard/alerts.py \
+        --open http://<laptop-ip>:8000/
     python3 dashboard/alerts.py --dry-run      # print alerts, send nothing
 
 A push that fails is kept and retried, backing off up to a minute. More
@@ -93,8 +94,9 @@ class Watcher:
     deliver(alert) returns True once the alert is out. Anything it couldn't
     send stays queued and is retried with backoff."""
 
-    def __init__(self, api, deliver, replay=False):
+    def __init__(self, api, deliver, replay=False, token=None):
         self.api = api
+        self.token = token  # the dashboard's, for reading /events; never sent to ntfy
         self.deliver = deliver
         self.since = 0 if replay else None  # None until the first read
         self.unsent = []
@@ -129,8 +131,9 @@ class Watcher:
 
     def _read(self):
         url = f"{self.api}/events?since={self.since or 0}"
+        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
         try:
-            with urllib.request.urlopen(url, timeout=5) as res:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=5) as res:
                 rows = json.load(res)
         except (OSError, ValueError) as err:
             print(f"can't read {self.api}/events ({err}), retrying", flush=True)
@@ -168,7 +171,7 @@ def main(argv=None):
     if "token=" in args.open:
         # Alerts go through ntfy.sh, where anyone who knows the topic can
         # read them, so a link that can approve payments must never ride along.
-        parser.error("--open must not carry the dashboard token; use the read-only link")
+        parser.error("--open must not carry the dashboard token; use the plain dashboard address")
 
     def deliver(alert):
         if args.dry_run:
@@ -183,7 +186,8 @@ def main(argv=None):
         return True
 
     try:
-        Watcher(args.api, deliver, replay=args.replay).run()
+        Watcher(args.api, deliver, replay=args.replay,
+                token=os.environ.get("ACCRUE_DASHBOARD_TOKEN")).run()
     except KeyboardInterrupt:
         pass
 

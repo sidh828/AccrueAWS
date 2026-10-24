@@ -45,6 +45,8 @@ def guard(tmp_path):
 def call(guard, method, path, body=None, token=None, content_type="application/json"):
     data = None if body is None else (
         body if isinstance(body, bytes) else json.dumps(body).encode())
+    if token is None and method == "GET":
+        token = TOKEN  # reads are the dashboard's; pass token="" to read without one
     request = urllib.request.Request(guard["base"] + path, data=data, method=method)
     if data is not None:
         request.add_header("Content-Type", content_type)
@@ -204,7 +206,7 @@ def test_the_stream_sends_new_payments_and_settled_ones(guard):
     known_payee(guard)
     host, port = guard["base"].removeprefix("http://").split(":")
     stream = http.client.HTTPConnection(host, int(port), timeout=10)
-    stream.request("GET", "/stream", headers={"Last-Event-ID": "1"})
+    stream.request("GET", f"/stream?token={TOKEN}", headers={"Last-Event-ID": "1"})
     response = stream.getresponse()
     assert response.status == 200
     assert response.getheader("Content-Type") == "text/event-stream"
@@ -448,3 +450,31 @@ def test_the_demo_is_decided_by_the_real_guard(tmp_path, monkeypatch):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_payment_history_is_the_dashboards_to_read(guard):
+    """Dharvik's review: /events and /stream were readable by anything that
+    could reach the guard. They're Mom's private history, so they need the
+    dashboard's token like /override; /stream also takes it as ?token=,
+    because the browser's EventSource can't send headers."""
+    known_payee(guard)
+    for token in ["", "wrong", TOKEN.upper()]:
+        assert call(guard, "GET", "/events", token=token)[0] == 401
+    status, rows = call(guard, "GET", "/events")
+    assert status == 200 and rows
+
+    host, port = guard["base"].removeprefix("http://").split(":")
+    for path, headers, expected in [
+        ("/stream", {}, 401),
+        ("/stream?token=wrong", {}, 401),
+        ("/stream", {"Authorization": f"Bearer {TOKEN}"}, 200),
+        (f"/stream?token={TOKEN}", {}, 200),
+    ]:
+        conn = http.client.HTTPConnection(host, int(port), timeout=10)
+        conn.request("GET", path, headers=headers)
+        assert conn.getresponse().status == expected, path
+        conn.close()
+
+    # The record check and the limits stay public: no payment details.
+    assert call(guard, "GET", "/verify", token="")[0] == 200
+    assert call(guard, "GET", "/limits", token="")[0] == 200

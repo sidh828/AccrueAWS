@@ -18,7 +18,8 @@ Approving needs the dashboard's token, the same rule the real guard
 follows: POST /override must send `Authorization: Bearer <token>`. The token
 comes from ACCRUE_DASHBOARD_TOKEN, or is made up at startup, and the printed
 link carries it as #token=... for the dashboard to pick up. The agent never
-gets it. Reading /events and /stream needs no token.
+gets it. Reading /events and /stream needs it too (/stream also takes
+?token=, since EventSource can't send headers).
 
 Nothing here is real: no Cedar, no money, and the hashes chain only
 within this process.
@@ -161,6 +162,10 @@ class Handler(BaseHTTPRequestHandler):
         if url.path in STATIC:
             name, content_type = STATIC[url.path]
             return self._send(200, (HERE / name).read_bytes(), content_type)
+        if url.path in ("/events", "/stream") and not self._from_dashboard(
+                parse_qs(url.query) if url.path == "/stream" else None):
+            # Same rule as guard/api.py: payments are only the dashboard's to read.
+            return self._json(401, {"error": "reading payments needs the dashboard's token"})
         if url.path == "/events":
             try:
                 since = int(parse_qs(url.query).get("since", ["0"])[0])
@@ -315,9 +320,13 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             self.streams.release()
 
-    def _from_dashboard(self):
+    def _from_dashboard(self, query=None):
         scheme, _, sent = self.headers.get("Authorization", "").partition(" ")
-        return scheme.lower() == "bearer" and hmac.compare_digest(sent.encode(), self.token.encode())
+        if scheme.lower() != "bearer" and query:
+            sent = query.get("token", [""])[0]
+        elif scheme.lower() != "bearer":
+            return False
+        return hmac.compare_digest(sent.encode(), self.token.encode())
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -376,9 +385,8 @@ def main(argv=None):
         daemon=True
     ).start()
     base = f"http://{args.host}:{args.port}/"
-    print(f"dashboard, can approve:  {base}#token={token}")
-    print(f"dashboard, read-only:    {base}")
-    print("(open the first link once on each device that should approve; Ctrl-C to stop)",
+    print(f"dashboard:  {base}#token={token}")
+    print("(open it once on each device that should see payments and approve them; Ctrl-C to stop)",
           flush=True)  # show the links even when output goes to a file
     try:
         server.serve_forever()
