@@ -26,7 +26,11 @@ const STATES = { allowed: "Allowed", held: "Waiting for you", pending: "Waiting 
 
 const rows = new Map(); // event_id -> the latest version of that row
 const busy = new Set(); // event_ids with an Approve/Deny in flight
+const cards = new Map(); // event_id -> its "Needs your OK" card, reused while unchanged
 let lastId = 0;
+let liveText = "Connecting…";
+let broken = false; // the last redraw threw
+let drawQueued = false;
 
 // ---- data ---------------------------------------------------------------
 
@@ -55,16 +59,17 @@ async function poll() {
 }
 
 function upsert(list) {
-  for (const row of list) {
+  for (const row of Array.isArray(list) ? list : []) {
+    if (!row || !Number.isSafeInteger(row.event_id)) continue; // nothing to key it by
     rows.set(row.event_id, row);
     lastId = Math.max(lastId, row.event_id);
   }
-  render();
+  draw();
 }
 
 async function override(row, action) {
   busy.add(row.event_id);
-  render();
+  draw();
   try {
     const res = await fetch(`${API}/override`, {
       method: "POST",
@@ -80,22 +85,39 @@ async function override(row, action) {
     alert(`That didn't go through (${err.message}). Please try again.`);
   } finally {
     busy.delete(row.event_id);
-    render();
+    draw();
   }
 }
 
 // ---- render -------------------------------------------------------------
 
+// Rows come from the guard, but tool, payee, category and chain start out as
+// whatever the agent asked for. Look names up without reaching the object
+// prototype ("constructor", "toString"), and fall back when a field is odd.
+const lookup = (table, key) => (typeof key === "string" && Object.hasOwn(table, key) ? table[key] : undefined);
+const text = (value, fallback) => (typeof value === "string" && value !== "" ? value : fallback);
+
 function money(cents) {
+  if (!Number.isSafeInteger(cents)) return "An unknown amount";
+  if (cents < 0) return `-${money(-cents)}`;
   const rest = cents % 100;
   const dollars = Math.floor(cents / 100).toLocaleString("en-US");
   return `$${dollars}${rest ? "." + String(rest).padStart(2, "0") : ""}`;
 }
-const total = (list) => list.reduce((sum, r) => sum + r.amount_cents, 0);
-const what = (r) => `${money(r.amount_cents)} ${TOOLS[r.tool] || r.tool.replaceAll("_", " ")} to ${r.payee}`;
-const why = (r) => RULES[r.rule] || r.explanation || "Stopped by a spending rule";
-const who = (r) => r.chain.slice(1).join(" → ") || r.person;
-const time = (r) => new Date(r.ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+const cents = (r) => (Number.isSafeInteger(r.amount_cents) ? r.amount_cents : 0);
+const total = (list) => list.reduce((sum, r) => sum + cents(r), 0);
+const toolName = (r) => lookup(TOOLS, r.tool) || text(r.tool, "payment").replaceAll("_", " ");
+const what = (r) => `${money(r.amount_cents)} ${toolName(r)} to ${text(r.payee, "an unknown payee")}`;
+const why = (r) =>
+  lookup(RULES, r.rule) || text(r.explanation, r.status === "held" ? "Waiting for your OK" : "Stopped by a spending rule");
+const who = (r) => (Array.isArray(r.chain) ? r.chain.slice(1).map(String).join(" → ") : "") || text(r.person, "the agent");
+const state = (r) => (lookup(STATES, r.status) ? r.status : "unknown"); // safe as a class name
+const stateLabel = (r) => lookup(STATES, r.status) || "Unknown";
+
+function time(r) {
+  const when = new Date(r.ts);
+  return Number.isNaN(when.getTime()) ? "" : when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
 
 // Builds DOM with strings as text, never as HTML: payees and explanations
 // come from the agent's side and the red team will try markup in them.
@@ -105,18 +127,47 @@ function el(tag, props = {}, ...children) {
   return node;
 }
 
-function setLive(text) {
-  document.getElementById("live").textContent = text;
+const nothingWaiting = el("p", {}, "Nothing needs your OK.");
+
+function setLive(message) {
+  liveText = message;
+  showLive();
+}
+
+function showLive() {
+  document.getElementById("live").textContent = broken
+    ? "Couldn't show the latest update. Reload the page."
+    : liveText;
+}
+
+// Redraw at most once per frame, however fast rows arrive. If a redraw
+// throws, say so instead of freezing while still saying "Live".
+function draw() {
+  if (drawQueued) return;
+  drawQueued = true;
+  requestAnimationFrame(() => {
+    drawQueued = false;
+    try {
+      render();
+      broken = false;
+    } catch (err) {
+      console.error(err);
+      broken = true;
+    }
+    showLive();
+  });
 }
 
 function render() {
   const today = new Date().toDateString();
-  const day = [...rows.values()]
-    .filter((r) => new Date(r.ts).toDateString() === today)
-    .sort((a, b) => a.event_id - b.event_id);
+  const isToday = (r) => new Date(r.ts).toDateString() === today;
+  const all = [...rows.values()].sort((a, b) => a.event_id - b.event_id);
+  const day = all.filter(isToday);
   const allowed = day.filter((r) => r.status === "allowed");
-  const waiting = day.filter((r) => r.status === "held" || r.status === "pending");
   const stopped = day.filter((r) => r.status === "released");
+  // A held payment waits for the family however long that takes, so unlike
+  // the running total it isn't limited to today.
+  const waiting = all.filter((r) => r.status === "held" || r.status === "pending");
 
   const banner = document.getElementById("banner");
   banner.hidden = !waiting.some((r) => r.rule === "breaker");
@@ -128,7 +179,7 @@ function render() {
     ? `Stopped ${stopped.length} ${stopped.length === 1 ? "payment" : "payments"} worth ${money(total(stopped))}`
     : "Nothing stopped today";
 
-  renderBar([...allowed, ...waiting, ...stopped]);
+  renderBar([...allowed, ...waiting.filter(isToday), ...stopped]);
   renderNeedsOk(waiting);
   renderMeters(allowed);
   document.getElementById("timeline").replaceChildren(...day.reverse().map(timelineItem));
@@ -138,34 +189,49 @@ function render() {
 // Waiting and stopped attempts go after the spent ones, past the line.
 function renderBar(segments) {
   const scale = Math.max(LIMITS.day, total(segments));
-  const pct = (cents) => `${(100 * cents) / scale}%`;
+  const pct = (amount) => `${(100 * amount) / scale}%`;
   const limit = el("div", { id: "limit" }, el("span", {}, `Today's limit ${money(LIMITS.day)}`));
   limit.style.left = pct(LIMITS.day);
   const bars = segments.map((r) => {
-    const seg = el("div", { className: `seg ${r.status}`, title: `${what(r)}: ${STATES[r.status]}` });
-    seg.style.width = pct(r.amount_cents);
+    const seg = el("div", { className: `seg ${state(r)}`, title: `${what(r)}: ${stateLabel(r)}` });
+    seg.style.width = pct(cents(r));
     return seg;
   });
   document.getElementById("bar").replaceChildren(...bars, limit);
 }
 
+// Cards are the only things people click, so a card is reused while its row
+// and button state are unchanged: a click that lands mid-redraw still hits
+// the same button.
 function renderNeedsOk(waiting) {
-  const cards = waiting.map((r) =>
-    el("div", { className: "card" },
+  const ids = new Set(waiting.map((r) => r.event_id));
+  for (const id of cards.keys()) if (!ids.has(id)) cards.delete(id);
+  const nodes = waiting.map((r) => {
+    const isBusy = busy.has(r.event_id);
+    const card = cards.get(r.event_id);
+    if (card && card.row === r && card.busy === isBusy) return card.node;
+    const node = el("div", { className: "card" },
       el("p", { className: "what" }, what(r)),
       el("p", {}, `${why(r)}. Asked by ${who(r)}.`),
-      el("button", { disabled: busy.has(r.event_id), onclick: () => override(r, "approve") }, "Approve"),
-      el("button", { disabled: busy.has(r.event_id), onclick: () => override(r, "deny") }, "Deny"),
-    ),
-  );
-  document.getElementById("needs-ok").replaceChildren(
-    ...(cards.length ? cards : [el("p", {}, "Nothing needs your OK.")]),
-  );
+      el("button", { disabled: isBusy, onclick: () => override(r, "approve") }, "Approve"),
+      el("button", { disabled: isBusy, onclick: () => override(r, "deny") }, "Deny"),
+    );
+    cards.set(r.event_id, { row: r, busy: isBusy, node });
+    return node;
+  });
+  const box = document.getElementById("needs-ok");
+  const want = nodes.length ? nodes : [nothingWaiting];
+  if (want.length !== box.children.length || want.some((node, i) => box.children[i] !== node)) {
+    box.replaceChildren(...want);
+  }
 }
 
 function renderMeters(allowed) {
   const byCategory = new Map();
-  for (const r of allowed) byCategory.set(r.category, (byCategory.get(r.category) || 0) + r.amount_cents);
+  for (const r of allowed) {
+    const category = text(r.category, "other");
+    byCategory.set(category, (byCategory.get(category) || 0) + cents(r));
+  }
   const giftCards = byCategory.get("gift_card") || 0;
   const others = [...byCategory].filter(([category]) => category !== "gift_card");
   document.getElementById("meters").replaceChildren(
@@ -173,8 +239,8 @@ function renderMeters(allowed) {
       `Gift cards: ${money(giftCards)} of ${money(LIMITS.gift_card_day)} `,
       el("meter", { min: 0, max: LIMITS.gift_card_day, value: giftCards }),
     ),
-    ...others.map(([category, cents]) =>
-      el("p", {}, `${CATEGORIES[category] || category.replaceAll("_", " ")}: ${money(cents)}`),
+    ...others.map(([category, sum]) =>
+      el("p", {}, `${lookup(CATEGORIES, category) || category.replaceAll("_", " ")}: ${money(sum)}`),
     ),
   );
 }
@@ -182,11 +248,11 @@ function renderMeters(allowed) {
 function timelineItem(r) {
   return el("li", {},
     el("span", { className: "time" }, time(r)), " ",
-    el("span", { className: `state ${r.status}` }, STATES[r.status] || r.status), " ",
+    el("span", { className: `state ${state(r)}` }, stateLabel(r)), " ",
     what(r),
     r.status === "allowed" ? "" : el("div", { className: "why" }, `${why(r)}. Asked by ${who(r)}.`),
   );
 }
 
-render();
+draw();
 connect();
