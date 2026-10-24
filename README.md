@@ -48,6 +48,12 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 #   ACCRUE_LEDGER_KEY   keys the ledger's hash chain
 #   ACCRUE_DASHBOARD_TOKEN  the dashboard's secret for approving (else made up)
 #   ACCRUE_ALLOWED_CONTACTS comma-separated recipients /outbound always allows
+#   ACCRUE_TOKEN_KEY    verifies agents' signed delegation tokens; with
+#   ACCRUE_REQUIRE_TOKENS=1 a request without a valid token is refused.
+#   Mint one for the agent:  ACCRUE_TOKEN_KEY=... python3 -m guard.tokens mint \
+#                              --person mom --agent bills-agent --day 50000
+#   A sub-agent narrows it (no key needed): python3 -m guard.tokens narrow TOKEN \
+#                              --agent giftcard-subagent --day 10000 --tools buy_gift_card
 # Generate a key with: python3 -c "import secrets; print(secrets.token_urlsafe(48))"
 .venv/bin/python -m guard.api --db ledger.db
 # Password-vault entries are still in memory and must be loaded at startup.

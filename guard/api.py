@@ -1,7 +1,8 @@
 """The guard's HTTP API: CLAUDE.md's interface contract over the real
 ledger and Cedar.
 
-    POST /authorize          agent -> guard: may this payment happen?
+    POST /authorize          agent -> guard: may this payment happen? (with "token":
+                             a signed delegation, guard/tokens.py)
     POST /inbound            agent -> walls: {session_id, source, content}
     POST /outbound           agent -> walls: {session_id, recipient, channel, content}
     POST /override           dashboard only: {event_id, action: approve|deny}
@@ -60,7 +61,7 @@ from walls.outbound import OutboundWall
 from walls.secrets import SecretStore
 from walls.storage import WallStateStore
 
-from . import authorize, ledger
+from . import authorize, ledger, tokens
 
 DASHBOARD = Path(__file__).parent.parent / "dashboard"
 STATIC = {
@@ -82,15 +83,34 @@ UNAVAILABLE = {"decision": "hold", "rule": authorize.GUARD_UNAVAILABLE,
                "needs_approval": True, "event_id": None}
 
 
-def answer_authorize(open_ledger, body, sessions, now=None):
+def answer_authorize(open_ledger, body, sessions, now=None, token_key=None,
+                     require_token=False):
     """POST /authorize's answer as (http_status, body), shared with
     guard.local.LocalGuard so the in-process guard behaves exactly like the
     server. `open_ledger()` returns a context manager yielding a
-    connection; `sessions` has is_tainted(session_id)."""
-    missing = [f for f in REQUIRED if f not in body]
+    connection; `sessions` has is_tainted(session_id).
+
+    A request's "token" (guard/tokens.py) is verified with `token_key`; the
+    chain then comes from the token and the request's own is ignored, as
+    the contract says. A forged, altered or expired token is a 401. With
+    `require_token`, so is a request without one."""
+    token = body.get("token")
+    delegation = None
+    if token:
+        try:
+            delegation = tokens.verify(token_key, token,
+                                       ledger.utc_timestamp(now) if now else None)
+        except tokens.TokenError as err:
+            return 401, {"error": f"bad delegation token: {err}"}
+    elif require_token:
+        return 401, {"error": "a signed delegation token is required"}
+    missing = [f for f in REQUIRED if f not in body and not (f == "chain" and delegation)]
     if missing:
         return 400, {"error": f"missing {', '.join(missing)}"}
     kwargs = {f: body[f] for f in REQUIRED + OPTIONAL if f in body}
+    if delegation is not None:
+        kwargs["chain"] = list(delegation.chain)
+        kwargs["delegation"] = delegation
     session_id = body["session_id"]
     kwargs["tainted"] = body.get("tainted") is True or (
         isinstance(session_id, str) and sessions.is_tainted(session_id)
@@ -153,6 +173,8 @@ class Handler(BaseHTTPRequestHandler):
     db_path = None
     token = None
     sessions = None  # walls.inbound.SessionStore: taint, shared with /inbound
+    token_key = None  # verifies delegation tokens (guard/tokens.py)
+    require_token = False
     inbound_wall = None
     outbound_wall = None
     streams = None  # a semaphore capping live /stream connections
@@ -218,7 +240,9 @@ class Handler(BaseHTTPRequestHandler):
         return self._override(body)
 
     def _authorize(self, body):
-        status, response = answer_authorize(self._ledger, body, self.sessions)
+        status, response = answer_authorize(self._ledger, body, self.sessions,
+                                            token_key=self.token_key,
+                                            require_token=self.require_token)
         if status == 200:
             self._wake_streams()
         self._json(status, response)
@@ -359,12 +383,17 @@ class _Connection:
 
 
 def make_server(db_path, token, host="127.0.0.1", port=8000, wall_key=None,
-                contacts=None, max_streams=MAX_STREAMS):
+                contacts=None, max_streams=MAX_STREAMS, token_key=None,
+                require_token=False):
     """A server for the ledger at `db_path`. `token` is the dashboard's
     secret for /override. `wall_key` (32+ bytes) keys the walls' stored
     digests of received codes; with it, taint and received codes are kept
     in the database and survive a restart, without it they live in memory.
-    `contacts` are the recipients /outbound always allows."""
+    `contacts` are the recipients /outbound always allows. `token_key`
+    verifies agents' delegation tokens; `require_token` refuses requests
+    without one."""
+    if require_token and not token_key:
+        raise ValueError("requiring tokens needs a token key")
     if not token:
         raise ValueError("the dashboard token can't be empty")
     storage = None
@@ -381,6 +410,7 @@ def make_server(db_path, token, host="127.0.0.1", port=8000, wall_key=None,
     conn.close()
     handler = type("BoundHandler", (Handler,), {
         "db_path": db_path, "token": token, "sessions": sessions,
+        "token_key": token_key, "require_token": require_token,
         "inbound_wall": InboundWall(sessions, secrets_store),
         "outbound_wall": OutboundWall(secrets_store, sessions, contacts=contacts or set()),
         "streams": threading.BoundedSemaphore(max_streams),
@@ -400,14 +430,20 @@ def main(argv=None):
     wall_key = os.environ.get("ACCRUE_WALL_KEY")
     contacts = {c.strip() for c in os.environ.get("ACCRUE_ALLOWED_CONTACTS", "").split(",")
                 if c.strip()}
+    token_key = os.environ.get("ACCRUE_TOKEN_KEY")
+    require_token = os.environ.get("ACCRUE_REQUIRE_TOKENS") == "1"
     server = make_server(args.db, token, args.host, args.port, wall_key=wall_key,
-                         contacts=contacts)
+                         contacts=contacts, token_key=token_key, require_token=require_token)
     base = f"http://{args.host}:{args.port}/"
     print(f"guard API on {base}  (ledger: {args.db})")
     print(f"dashboard, can approve:  {base}#token={token}")
     print(f"dashboard, read-only:    {base}")
     if not os.environ.get("ACCRUE_LEDGER_KEY"):
         print("note: ACCRUE_LEDGER_KEY isn't set, so the ledger is hashed without a key")
+    if not token_key:
+        print("note: ACCRUE_TOKEN_KEY isn't set, so agents' delegation tokens can't be checked")
+    elif not require_token:
+        print("note: ACCRUE_REQUIRE_TOKENS isn't 1, so requests without a token are accepted")
     if not wall_key:
         print("note: ACCRUE_WALL_KEY isn't set, so taint and received codes are kept in "
               "memory and forgotten on restart")

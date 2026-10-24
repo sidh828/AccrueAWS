@@ -56,6 +56,9 @@ def facts(event):
         "new_payee": bool(context.get("new_payee")),
         "recent_payee": bool(context.get("recent_payee")),
         "known_bill": bool(context.get("known_bill")),
+        "tool": context.get("tool") or event.get("tool"),
+        "delegation_headroom_cents": context.get("delegation_headroom"),
+        "agent": (event.get("chain") or [None])[-1],
     }
 
 
@@ -107,6 +110,12 @@ def template(event):
         "bill_increase": lambda: (
             f"Waiting for you: {amount} to {payee} is more than 20% over last time "
             f"({money(f['last_bill_cents'])})."),
+        "delegation_tool": lambda: (
+            f"Stopped: {f['agent']} wasn't given the {f['tool']} tool, so it can't "
+            f"pay {amount} to {payee}."),
+        "delegation_budget": lambda: (
+            f"Stopped: {f['agent']} has {money(f['delegation_headroom_cents'])} left of "
+            f"the budget it was given for 24 hours, and asked for {amount}."),
         "breaker": lambda: (
             f"Waiting for you: payments are paused after {f['recent_denials']} stopped "
             f"attempts in 10 minutes."),
@@ -129,6 +138,7 @@ _RELEVANT = {
     "recent_payee_cap": ("recent_payees_total_cents", "recent_payees_limit_cents"),
     "bill_increase": ("last_bill_cents",),
     "breaker": ("recent_denials", "breaker_denials"),
+    "delegation_budget": ("delegation_headroom_cents",),
 }
 
 _MONEY = re.compile(r"\$\s?(\d[\d,]*)(?:\.(\d{1,2}))?")
