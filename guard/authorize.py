@@ -154,7 +154,7 @@ def authorize_transfer(conn, session_id, resource, amount_usd, scope_id=None):
         # A tripped home doesn't get to ask again, no matter how small the
         # amount, how much cumulative-cost headroom remains, or which task
         # under it is asking - that's the whole point of the breaker (see
-        # src/breaker.py). Only an explicit ledger.insert_override logged
+        # guard/breaker.py). Only an explicit ledger.insert_override logged
         # against the home resets it.
         if breaker.is_tripped(conn, home):
             ledger.insert_event(

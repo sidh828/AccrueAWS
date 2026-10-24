@@ -4,7 +4,7 @@ rolls up a node plus everything nested under it - the same prefix trick
 `du` uses on a real filesystem. See NOTES.md "Scope paths".
 """
 
-from src import aggregates, ledger
+from guard import aggregates, ledger
 
 
 def conn():

@@ -5,8 +5,8 @@ writeup; these are the target behavior for breaker.is_tripped, which is
 currently a TODO stub - this file is expected to fail until it's written.
 """
 
-from src import ledger
-from src import breaker
+from guard import ledger
+from guard import breaker
 
 
 def conn():

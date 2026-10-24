@@ -10,7 +10,7 @@ import threading
 
 import pytest
 
-from src import authorize, ledger
+from guard import authorize, ledger
 
 
 @pytest.fixture

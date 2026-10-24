@@ -1,6 +1,6 @@
 """Demo: replay PRIMER.md's 50x-$9,999 scenario — this time with memory.
 
-Run from the repo root:  python3 -m src.main
+Run from the repo root:  python3 -m guard.main
 """
 
 from . import ledger

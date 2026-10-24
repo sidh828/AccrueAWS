@@ -4,7 +4,7 @@ target behavior for aggregates.cumulative_cost_for_scope, which is
 currently a TODO stub - this file is expected to fail until it's written.
 """
 
-from src import aggregates, ledger
+from guard import aggregates, ledger
 
 
 def conn():

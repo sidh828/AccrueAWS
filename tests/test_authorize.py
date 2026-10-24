@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src import authorize, ledger
-from src.authorize import _ask_cedar
+from guard import authorize, ledger
+from guard.authorize import _ask_cedar
 
 
 @pytest.fixture
@@ -33,7 +33,7 @@ def test_50x_9999_eventually_denies(conn):
 def test_denied_attempts_do_not_inflate_the_total(conn):
     """A burst of rejected requests must not itself push a session's
     cumulative cost over budget - only ALLOWed amounts count toward future
-    totals. But since src/breaker.py, that's no longer the whole story: the
+    totals. But since guard/breaker.py, that's no longer the whole story: the
     first DENY trips the circuit breaker for this scope, and a tripped
     scope stays denied - regardless of remaining cumulative-cost headroom -
     until a human logs an explicit override. This test now proves both
