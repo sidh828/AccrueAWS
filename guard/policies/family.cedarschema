@@ -26,6 +26,9 @@ action pay appliesTo {
         new_payee: Bool,
         // Not new, but first paid within the last 30 days.
         recent_payee: Bool,
+        // Allowed to this payee since it was first paid, if that was within
+        // the last 30 days, including this request (else just this request).
+        payee_recent_total: Long,
         // Allowed in the last 30 days to payees first paid within those 30
         // days, including this request if it's to a new or recent payee.
         recent_payees_total: Long,

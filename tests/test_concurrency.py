@@ -22,6 +22,11 @@ def db(tmp_path):
     path = str(tmp_path / "ledger.db")
     conn = ledger.connect(path)
     conn.execute("PRAGMA journal_mode=WAL")  # as guard/api.py runs it
+    # The grocer and the gift-card shop are long-standing payees.
+    for payee, category in [("kroger.example", "groceries"), ("giftcards.example", "gift_card")]:
+        ledger.insert_event(conn, "2026-01-01T00:00:00.000000Z", "h", "pay", payee, 100,
+                            "ALLOW", scope_id="mom/bills-agent", payee=payee, category=category)
+    conn.commit()
     conn.close()
     return path
 
@@ -88,7 +93,7 @@ def test_a_mixed_crowd_at_once_keeps_every_guarantee(db):
     conn = ledger.connect(db)
     # Every answer is logged exactly once; a request that timed out on the
     # lock left nothing behind - it wasn't paid, and it isn't half-written.
-    assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == len(answered)
+    assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == len(answered) + 2
     assert broken(conn) == []
 
 
@@ -101,7 +106,7 @@ def test_retries_racing_each_other_are_one_payment(db):
     assert len({r["event_id"] for r in results}) == 1
     assert {r["decision"] for r in results} == {"allow"}
     conn = ledger.connect(db)
-    assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1 + 2
     assert broken(conn) == []
 
 

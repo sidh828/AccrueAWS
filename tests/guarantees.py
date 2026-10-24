@@ -70,9 +70,24 @@ def broken(conn):
             if total(recent) > cap:
                 problems.append(f"{label}: {total(recent)} to recent payees in 30 days")
 
-        # A known bill: at most last time plus 20%.
-        if context["known_bill"] and e["amount_cents"] * 5 > context["last_bill"] * 6:
-            problems.append(f"{label}: known bill over last time + 20%")
+        # Someone new: at most $200 in their first 30 days (the family's
+        # approvals aside), so a $1 "verification" can't unlock a big payment.
+        first_at = when(first[(home, e["payee"])])
+        if first_at >= t - MONTH:
+            payee_rows = [x for x in mine if x["payee"] == e["payee"] and when(x) >= first_at
+                          and x["resolves"] is None]
+            if total(payee_rows) > limits["new_payee_first"]:
+                problems.append(f"{label}: {total(payee_rows)} to a payee in its first 30 days")
+
+        # A known bill: at most last time plus 20%, and once a cycle - not if
+        # the payee was already paid in the last 20 days.
+        if context["known_bill"]:
+            if e["amount_cents"] * 5 > context["last_bill"] * 6:
+                problems.append(f"{label}: known bill over last time + 20%")
+            earlier = [x for x in mine if x["payee"] == e["payee"] and x["id"] < e["id"]
+                       and when(x) > t - timedelta(days=20)]
+            if earlier:
+                problems.append(f"{label}: a known bill paid twice in one cycle")
 
         # Nothing goes through while the breaker is tripped.
         reset = max((a for s, a in overrides if s == home and a < e["id"]), default=0)

@@ -64,13 +64,23 @@ when {
 forbid (principal, action == Action::"pay", resource)
 when { context.is_gift_card && context.tainted };
 
-// First payment to someone new: $200. After a scam flag, any first payment
-// waits for the family's OK.
+// Someone new: a first payment over $200 is stopped - that's what stops a bail
+// wire. After it, $200 in the payee's first 30 days, all payments together:
+// past that waits for the family, so a $1 "verification" payment doesn't
+// unlock a $450 one, and a real new contractor can still be approved. After
+// a scam flag, any first payment waits for the family's OK.
 @id("new_payee_cap")
 forbid (principal, action == Action::"pay", resource)
 when {
     context.new_payee && !context.tainted &&
     context.amount > context.limits.new_payee_first
+};
+
+@id("new_payee_month_cap")
+forbid (principal, action == Action::"pay", resource)
+when {
+    context.recent_payee && !context.tainted &&
+    context.payee_recent_total > context.limits.new_payee_first
 };
 
 @id("new_payee_needs_approval")

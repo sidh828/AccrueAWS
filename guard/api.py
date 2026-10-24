@@ -13,6 +13,9 @@ ledger and Cedar.
     GET  /verify             {ok, first_bad_event_id, first_bad_override_id, head}
                              (?anchor_id=&anchor_hash= checks a head kept elsewhere)
     GET  /limits             the spending limits, normal and after a scam flag
+    POST /demo/run           dashboard only, with --demo: {scenario} plays a scripted
+                             set of *requests* through the real guard (see DEMO)
+    GET  /demo/status        {running, enabled}
     GET  /, /app.js          the dashboard, served from dashboard/
 
     python3 -m guard.api                    # prints the dashboard links
@@ -48,12 +51,14 @@ Standard library only (http.server), like the stand-in.
 """
 
 import argparse
+from datetime import datetime, timedelta, timezone
 import hmac
 import json
 import os
 import secrets
 import sqlite3
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -80,13 +85,53 @@ STREAM_POLL = 1.0  # seconds between ledger checks when nothing woke a stream
 REQUIRED = ("person", "chain", "tool", "amount_cents", "payee", "category", "session_id")
 OPTIONAL = ("request_id", "reason")
 
+# Untrusted text taints the household for this long (CLAUDE.md: "the stricter
+# column applies while the session is tainted, or ... for 6 hours"). It's the
+# household, not the session: taint keyed only on the session id the agent
+# sends was escaped by starting a new conversation.
+HOUSEHOLD_TAINT = timedelta(hours=6)
+
 # What the agent gets when the guard itself is down: a hold, never an allow.
 UNAVAILABLE = {"decision": "hold", "rule": authorize.GUARD_UNAVAILABLE,
                "needs_approval": True, "event_id": None}
 
 
+# The video's demo, for the React dashboard's scenario buttons (it calls the
+# same /demo/run as dashboard/fake_api.py). The stand-in's demo replays rows
+# with their decisions typed in; here only the *requests* are scripted, and
+# the real guard and walls decide every one of them - so what the dashboard
+# shows is what the guard did. Scenarios run in this order, as on the
+# stand-in. Each step is ("pay", tool, cents, payee, category, chain).
+BILLS = ["mom", "bills-agent"]
+SUBAGENT = ["mom", "bills-agent", "giftcard-subagent"]
+DEMO = {
+    "normal_day": [
+        ("pay", "pay_bill", 12_000, "ohio-power.example", "utility", BILLS),
+        ("pay", "buy_gift_card", 5_000, "giftcards.example", "gift_card", BILLS),
+    ],
+    "gift_card_scam": [
+        ("pay", "buy_gift_card", 45_000, "giftcards.example", "gift_card", BILLS),
+        ("pay", "buy_gift_card", 45_000, "giftcards.example", "gift_card", BILLS),
+    ],
+    "channel_switch": [
+        ("pay", "send_zelle", 45_000, "zelle:new-contact", "transfer", BILLS),
+        ("pay", "buy_gift_card", 30_000, "giftcards.example", "gift_card", SUBAGENT),
+    ],
+    "held_bill": [
+        ("pay", "pay_bill", 48_000, "ace-plumbing.example", "home_repair", BILLS),
+    ],
+}
+DEMO_ORDER = list(DEMO)
+# Mom's history before the demo: last month's power bill, and the plumber
+# she used in August - so the power bill is a known bill and the plumber
+# isn't a stranger.
+DEMO_HISTORY = [(30, "ohio-power.example", "utility", 11_000),
+                (60, "ace-plumbing.example", "home_repair", 18_500)]
+DEMO_STEP_SECONDS = 1.5
+
+
 def answer_authorize(open_ledger, body, sessions, now=None, token_key=None,
-                     require_token=False):
+                     require_token=False, people=None):
     """POST /authorize's answer as (http_status, body), shared with
     guard.local.LocalGuard so the in-process guard behaves exactly like the
     server. `open_ledger()` returns a context manager yielding a
@@ -95,7 +140,13 @@ def answer_authorize(open_ledger, body, sessions, now=None, token_key=None,
     A request's "token" (guard/tokens.py) is verified with `token_key`; the
     chain then comes from the token and the request's own is ignored, as
     the contract says. A forged, altered or expired token is a 401. With
-    `require_token`, so is a request without one."""
+    `require_token`, so is a request without one. With `people`, a person
+    not on it is refused: without tokens, "person" is just a string, and a
+    new one would get a fresh budget.
+
+    Taint is the request's own "tainted": true, the session's taint from
+    /inbound, or any untrusted text reaching the household in the last
+    HOUSEHOLD_TAINT."""
     token = body.get("token")
     delegation = None
     if token:
@@ -110,6 +161,8 @@ def answer_authorize(open_ledger, body, sessions, now=None, token_key=None,
     if missing:
         return 400, {"error": f"missing {', '.join(missing)}"}
     kwargs = {f: body[f] for f in REQUIRED + OPTIONAL if f in body}
+    if people is not None and str(body.get("person", "")).strip().lower() not in people:
+        return 403, {"error": f"{body.get('person')!r} isn't a person this guard serves"}
     if delegation is not None:
         kwargs["chain"] = list(delegation.chain)
         kwargs["delegation"] = delegation
@@ -119,6 +172,9 @@ def answer_authorize(open_ledger, body, sessions, now=None, token_key=None,
     )
     try:
         with open_ledger() as conn:
+            moment = now or datetime.now(timezone.utc)
+            if ledger.untrusted_since(conn, ledger.utc_timestamp(moment - HOUSEHOLD_TAINT)):
+                kwargs["tainted"] = True
             return 200, authorize.authorize_payment(conn, now=now, **kwargs)
     except ValueError as err:
         return 400, {"error": str(err)}
@@ -177,6 +233,8 @@ class Handler(BaseHTTPRequestHandler):
     sessions = None  # walls.inbound.SessionStore: taint, shared with /inbound
     token_key = None  # verifies delegation tokens (guard/tokens.py)
     require_token = False
+    people = None  # the people this guard serves, or None for anyone
+    demo = None  # {enabled, running, next, lock}: the /demo/run state
     inbound_wall = None
     outbound_wall = None
     streams = None  # a semaphore capping live /stream connections
@@ -201,6 +259,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._stream()
         if url.path == "/limits":
             return self._json(200, limits())
+        if url.path == "/demo/status":
+            return self._json(200, {"running": self.demo["running"],
+                                    "enabled": self.demo["enabled"]})
         if url.path == "/events":
             try:
                 since = int(query.get("since", ["0"])[0])
@@ -222,13 +283,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/authorize", "/override", "/inbound", "/outbound", "/replay"):
+        if path not in ("/authorize", "/override", "/inbound", "/outbound", "/replay",
+                        "/demo/run"):
             return self._json(404, {"error": "not found"})
         # JSON only: a web page can send a text/plain POST anywhere without
         # asking first. A JSON body makes the browser ask (CORS) first.
         if self.headers.get_content_type() != "application/json":
             return self._json(415, {"error": "the body must be JSON"})
-        if path in ("/override", "/replay") and not self._from_dashboard():
+        if path in ("/override", "/replay", "/demo/run") and not self._from_dashboard():
             return self._json(401, {"error": f"{path} needs the dashboard's token"})
         body = self._body()
         if body is None:
@@ -241,12 +303,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._outbound(body)
         if path == "/replay":
             return self._replay(body)
+        if path == "/demo/run":
+            return self._demo(body)
         return self._override(body)
 
     def _authorize(self, body):
         status, response = answer_authorize(self._ledger, body, self.sessions,
                                             token_key=self.token_key,
-                                            require_token=self.require_token)
+                                            require_token=self.require_token,
+                                            people=self.people)
         if status == 200:
             self._wake_streams()
         self._json(status, response)
@@ -255,6 +320,10 @@ class Handler(BaseHTTPRequestHandler):
         if not _strings(body, "session_id", "source", "content") or not body["session_id"]:
             return self._json(400, {"error": "expected {session_id, source, content} as strings"})
         result = self.inbound_wall.ingest(body["session_id"], body["source"], body["content"])
+        if not result.trusted:
+            with self._ledger() as conn:
+                ledger.record_untrusted(conn, ledger.utc_timestamp(), body["session_id"],
+                                        body["source"])
         self._json(200, result.to_contract())
 
     def _outbound(self, body):
@@ -264,6 +333,42 @@ class Handler(BaseHTTPRequestHandler):
                                              "content} as strings"})
         self._json(200, self.outbound_wall.check(body["session_id"], body["recipient"],
                                                  body["channel"], body["content"]))
+
+    def _demo(self, body):
+        scenario = body.get("scenario")
+        if not self.demo["enabled"]:
+            return self._json(409, {"error": "Start the guard with --demo"})
+        if scenario not in DEMO:
+            return self._json(400, {"error": "Unknown scenario"})
+        with self.demo["lock"]:
+            if self.demo["running"]:
+                return self._json(409, {"error": "Demo already running"})
+            if self.demo["next"] >= len(DEMO_ORDER):
+                return self._json(409, {"error": "Demo complete. Restart the guard to run again."})
+            expected = DEMO_ORDER[self.demo["next"]]
+            if scenario != expected:
+                return self._json(409, {"error": f"Run {expected} next"})
+            self.demo["running"] = True
+
+        def play():
+            try:
+                for step in DEMO[scenario]:
+                    time.sleep(DEMO_STEP_SECONDS)
+                    _, tool, cents, payee, category, chain = step
+                    answer_authorize(self._ledger, {
+                        "person": chain[0], "chain": chain, "tool": tool,
+                        "amount_cents": cents, "payee": payee, "category": category,
+                        "session_id": "demo", "reason": f"demo: {scenario}"},
+                        self.sessions, people=self.people)
+                    self._wake_streams()
+                with self.demo["lock"]:
+                    self.demo["next"] += 1
+            finally:
+                with self.demo["lock"]:
+                    self.demo["running"] = False
+
+        threading.Thread(target=play, daemon=True).start()
+        self._json(202, {"started": scenario})
 
     def _replay(self, body):
         policy, since = body.get("policy"), body.get("since")
@@ -400,7 +505,7 @@ class _Connection:
 
 def make_server(db_path, token, host="127.0.0.1", port=8000, wall_key=None,
                 contacts=None, max_streams=MAX_STREAMS, token_key=None,
-                require_token=False):
+                require_token=False, people=None, demo=False):
     """A server for the ledger at `db_path`. `token` is the dashboard's
     secret for /override. `wall_key` (32+ bytes) keys the walls' stored
     digests of received codes; with it, taint and received codes are kept
@@ -419,6 +524,13 @@ def make_server(db_path, token, host="127.0.0.1", port=8000, wall_key=None,
     sessions = SessionStore(storage=storage)
     secrets_store = SecretStore(storage=storage)
     conn = ledger.connect(db_path)
+    if demo and not conn.execute("SELECT 1 FROM events LIMIT 1").fetchone():
+        now = datetime.now(timezone.utc)
+        for days_ago, payee, category, cents in DEMO_HISTORY:
+            ledger.insert_event(conn, ledger.utc_timestamp(now - timedelta(days=days_ago)),
+                                "history", "pay", payee, cents, "ALLOW", scope_id="mom/bills-agent",
+                                payee=payee, category=category)
+        conn.commit()
     if db_path != ":memory:":
         # Readers (the dashboard, /verify) don't wait for writers, or the
         # other way round.
@@ -427,6 +539,8 @@ def make_server(db_path, token, host="127.0.0.1", port=8000, wall_key=None,
     handler = type("BoundHandler", (Handler,), {
         "db_path": db_path, "token": token, "sessions": sessions,
         "token_key": token_key, "require_token": require_token,
+        "people": None if people is None else {p.strip().lower() for p in people},
+        "demo": {"enabled": demo, "running": False, "next": 0, "lock": threading.Lock()},
         "inbound_wall": InboundWall(sessions, secrets_store),
         "outbound_wall": OutboundWall(secrets_store, sessions, contacts=contacts or set()),
         "streams": threading.BoundedSemaphore(max_streams),
@@ -440,6 +554,8 @@ def main(argv=None):
     parser.add_argument("--db", default="ledger.db", help="the ledger file (default ledger.db)")
     parser.add_argument("--host", default="127.0.0.1", help="0.0.0.0 to open it from a phone")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--demo", action="store_true",
+                        help="enable /demo/run: the video's scenarios, decided by the real guard")
     args = parser.parse_args(argv)
 
     token = os.environ.get("ACCRUE_DASHBOARD_TOKEN") or secrets.token_urlsafe(24)
@@ -448,14 +564,19 @@ def main(argv=None):
                 if c.strip()}
     token_key = os.environ.get("ACCRUE_TOKEN_KEY")
     require_token = os.environ.get("ACCRUE_REQUIRE_TOKENS") == "1"
+    people = [p for p in os.environ.get("ACCRUE_PEOPLE", "").split(",") if p.strip()] or None
     server = make_server(args.db, token, args.host, args.port, wall_key=wall_key,
-                         contacts=contacts, token_key=token_key, require_token=require_token)
+                         contacts=contacts, token_key=token_key, require_token=require_token,
+                         people=people, demo=args.demo)
     base = f"http://{args.host}:{args.port}/"
     print(f"guard API on {base}  (ledger: {args.db})")
     print(f"dashboard, can approve:  {base}#token={token}")
     print(f"dashboard, read-only:    {base}")
     if not os.environ.get("ACCRUE_LEDGER_KEY"):
         print("note: ACCRUE_LEDGER_KEY isn't set, so the ledger is hashed without a key")
+    if not people and not require_token:
+        print("note: neither ACCRUE_PEOPLE nor ACCRUE_REQUIRE_TOKENS=1 is set, so any "
+              "'person' is accepted - and each new one gets a fresh budget")
     if not token_key:
         print("note: ACCRUE_TOKEN_KEY isn't set, so agents' delegation tokens can't be checked")
     elif not require_token:

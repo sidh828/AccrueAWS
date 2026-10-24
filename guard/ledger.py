@@ -95,6 +95,17 @@ CREATE TABLE IF NOT EXISTS overrides (
 
 CREATE INDEX IF NOT EXISTS idx_overrides_scope_id ON overrides (scope_id);
 
+-- Untrusted text that reached the agent (POST /inbound from an untrusted
+-- source). The guard serves one household, so any of it makes the whole
+-- household's next hours stricter - not just the session that saw it,
+-- because a new conversation is a new session (see api.answer_authorize).
+CREATE TABLE IF NOT EXISTS untrusted_inbound (
+    id         INTEGER PRIMARY KEY,
+    at         TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    source     TEXT NOT NULL
+);
+
 CREATE TRIGGER IF NOT EXISTS prevent_override_updates
 BEFORE UPDATE ON overrides
 BEGIN
@@ -209,6 +220,20 @@ def _append(conn, table, row):
     conn.execute(f"INSERT INTO {table} ({columns}) VALUES ({', '.join('?' * len(row))})",
                  tuple(row.values()))
     return next_id
+
+
+def record_untrusted(conn, at, session_id, source):
+    """Note that untrusted text reached the agent at `at` (a ledger
+    timestamp). Commits."""
+    conn.execute("INSERT INTO untrusted_inbound (at, session_id, source) VALUES (?, ?, ?)",
+                 (at, session_id, source))
+    conn.commit()
+
+
+def untrusted_since(conn, since):
+    """Whether any untrusted text reached the agent at or after `since`."""
+    return conn.execute("SELECT 1 FROM untrusted_inbound WHERE at >= ? LIMIT 1",
+                        (since,)).fetchone() is not None
 
 
 def head(conn):
