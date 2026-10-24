@@ -1,0 +1,17 @@
+// Shapes the request budget.cedar is written against: who can act, what
+// action, on what, and exactly which context attributes exist. `cedar
+// validate --schema budget.cedarschema --policies budget.cedar` checks every
+// policy against this - a typo'd context attribute (cumulative_kost instead
+// of cumulative_cost) fails validation instead of silently erroring out of
+// an authorize call at runtime. See PRIMER.md and the note atop authorize.py.
+
+entity Session;
+entity Account;
+
+action transfer appliesTo {
+    principal: [Session],
+    resource: [Account],
+    context: {
+        cumulative_cost: Long
+    }
+};
