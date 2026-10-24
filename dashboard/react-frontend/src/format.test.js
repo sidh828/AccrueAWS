@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { asPercent, money, summarize } from './format.js';
+import { asPercent, limitsFrom, money, summarize } from './format.js';
 
 test('money uses integer cents and displays two decimal places', () => {
   assert.equal(money(0), '$0.00');
@@ -25,4 +25,25 @@ test('only allowed rows count as actual spending', () => {
 test('progress percentages clamp visually without modifying money', () => {
   assert.equal(asPercent(12000,50000), 24);
   assert.equal(asPercent(60000,50000), 100);
+});
+
+test('the window is the last 24 hours, like the guard, and known bills are left out', () => {
+  const now = Date.parse('2026-10-25T01:00:00Z');
+  const at = (hoursAgo) => new Date(now - hoursAgo * 3600_000).toISOString();
+  const result = summarize([
+    { event_id: 1, ts: at(25), status: 'allowed', amount_cents: 20000, category: 'groceries' },
+    { event_id: 2, ts: at(23), status: 'allowed', amount_cents: 10000, category: 'groceries' },
+    { event_id: 3, ts: at(2), status: 'allowed', amount_cents: 12000, category: 'utility', known_bill: true },
+    { event_id: 4, ts: at(30), status: 'held', amount_cents: 18000, category: 'home_repair' },
+  ], now);
+  assert.equal(result.spent, 10000);      // 25 hours ago aged out; the known bill doesn't count
+  assert.equal(result.knownBills, 12000);
+  assert.equal(result.waiting.length, 1);  // held 30 hours ago, still waiting
+  assert.equal(result.today.length, 2);
+});
+
+test('limits come from GET /limits, with the plan values as a fallback', () => {
+  assert.deepEqual(limitsFrom({ normal: { day: 40000, gift_card_day: 5000 } }), { day: 40000, gift_card_day: 5000 });
+  assert.deepEqual(limitsFrom(null), { day: 50000, gift_card_day: 10000 });
+  assert.deepEqual(limitsFrom({ normal: { day: '1' } }), { day: 50000, gift_card_day: 10000 });
 });
