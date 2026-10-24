@@ -2,9 +2,17 @@
 
 See PRIMER.md Part 2. Rows are only ever inserted, never updated or deleted;
 that's what makes the totals in aggregates.py trustworthy.
+
+The triggers in SCHEMA refuse UPDATE and DELETE, but anyone with the file
+can drop a trigger. So every row also carries row_hash, chained to the row
+before it (see _chain_hash), and verify() walks the chain: editing,
+inserting or deleting a row anywhere breaks it at that exact row.
 """
 
+import hashlib
+import hmac
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 
@@ -42,7 +50,8 @@ CREATE TABLE IF NOT EXISTS events (
     chain       TEXT,
     reason      TEXT,
     rule        TEXT,
-    context     TEXT
+    context     TEXT,
+    row_hash    TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_session_id ON events (session_id);
@@ -78,7 +87,8 @@ CREATE TABLE IF NOT EXISTS overrides (
     scope_id       TEXT NOT NULL,
     authorized_by  TEXT NOT NULL,
     reason         TEXT NOT NULL,
-    after_event_id INTEGER NOT NULL
+    after_event_id INTEGER NOT NULL,
+    row_hash       TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_overrides_scope_id ON overrides (scope_id);
@@ -139,6 +149,100 @@ def connect(db_path="ledger.db"):
     return conn
 
 
+# --- Hash chain -----------------------------------------------------------
+#
+# row_hash = sha256(previous row's row_hash + canonical JSON of this row),
+# starting from GENESIS_HASH, with the row's id and every column but
+# row_hash itself, exactly as stored. events and overrides are separate
+# chains. Changing any stored value, or removing or slipping in a row,
+# makes that row's hash disagree with the one recomputed from the row
+# before it.
+#
+# Plain sha256 catches edits, not someone with the file who edits a row and
+# then recomputes every hash after it. Two things stop that: head() is
+# meant to be shown off the box (dashboard, phone alert) and checked with
+# verify(anchor=...), and with ACCRUE_LEDGER_KEY set the hash is an HMAC
+# under a key that lives with the guard process, not in the file.
+
+GENESIS_HASH = "0" * 64
+
+# What each chain hashes, besides the id. Order doesn't matter (the JSON is
+# key-sorted), but every stored column must be here.
+_EVENT_HASHED = ("timestamp", "session_id", "scope_id", "home", "action",
+                 "resource", "amount_cents", "decision", "request_id", "resolves",
+                 "payee", "category", "tool", "chain", "reason", "rule", "context")
+_OVERRIDE_HASHED = ("timestamp", "scope_id", "authorized_by", "reason",
+                    "after_event_id")
+
+
+def _chain_hash(prev_hash, row):
+    payload = prev_hash + json.dumps(row, sort_keys=True, separators=(",", ":"),
+                                     ensure_ascii=False)
+    key = os.environ.get("ACCRUE_LEDGER_KEY")
+    if key:
+        return hmac.new(key.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _append(conn, table, row):
+    """Insert `row` (column -> value) into `table` as the next link of its
+    chain and return its id. The id is assigned here, not by SQLite, so it
+    can be part of what's hashed. The caller owns the transaction."""
+    next_id, prev_hash = conn.execute(
+        f"SELECT COALESCE(MAX(id), 0) + 1, "
+        f"(SELECT row_hash FROM {table} ORDER BY id DESC LIMIT 1) FROM {table}"
+    ).fetchone()
+    row = {"id": next_id, **row}
+    row["row_hash"] = _chain_hash(prev_hash or GENESIS_HASH,
+                                  {k: v for k, v in row.items() if k != "row_hash"})
+    columns = ", ".join(row)
+    conn.execute(f"INSERT INTO {table} ({columns}) VALUES ({', '.join('?' * len(row))})",
+                 tuple(row.values()))
+    return next_id
+
+
+def head(conn):
+    """The last event's id and row_hash, or None for an empty ledger. Shown
+    somewhere the ledger file can't reach, it lets verify() catch a rewrite
+    of everything up to it."""
+    row = conn.execute("SELECT id, row_hash FROM events ORDER BY id DESC LIMIT 1").fetchone()
+    return None if row is None else {"event_id": row[0], "row_hash": row[1]}
+
+
+def verify(conn, anchor=None):
+    """Walk both chains in id order. Returns {"ok", "first_bad_event_id",
+    "first_bad_override_id", "head"}: the first row whose hash doesn't
+    match what the row before it says it should be, in each chain, or None.
+
+    `anchor` is a head() taken earlier and kept off the box. If the row it
+    names is gone or has a different hash now, that row is reported - even
+    if everything up to it was rewritten and re-hashed consistently.
+    """
+    found = {}
+    for table, columns, key in (("events", _EVENT_HASHED, "first_bad_event_id"),
+                                ("overrides", _OVERRIDE_HASHED, "first_bad_override_id")):
+        found[key] = None
+        prev_hash = GENESIS_HASH
+        rows = conn.execute(
+            f"SELECT id, row_hash, {', '.join(columns)} FROM {table} ORDER BY id"
+        )
+        for row_id, stored, *values in rows:
+            if stored != _chain_hash(prev_hash, {"id": row_id, **dict(zip(columns, values))}):
+                found[key] = row_id
+                break
+            prev_hash = stored
+
+    if anchor is not None:
+        row = conn.execute("SELECT row_hash FROM events WHERE id = ?",
+                           (anchor["event_id"],)).fetchone()
+        if row is None or row[0] != anchor["row_hash"]:
+            bad = found["first_bad_event_id"]
+            found["first_bad_event_id"] = (anchor["event_id"] if bad is None
+                                           else min(bad, anchor["event_id"]))
+
+    return {"ok": all(v is None for v in found.values()), **found, "head": head(conn)}
+
+
 def insert_event(conn, timestamp, session_id, action, resource, amount_cents, decision,
                   scope_id=None, request_id=None, resolves=None, payee=None,
                   category=None, tool=None, chain=None, reason=None, rule=None,
@@ -160,24 +264,32 @@ def insert_event(conn, timestamp, session_id, action, resource, amount_cents, de
     if scope_id is None:
         scope_id = session_id
     scope_id = normalize_scope(scope_id)
-    cursor = conn.execute(
-        "INSERT INTO events "
-        "(timestamp, session_id, scope_id, home, action, resource, amount_cents, "
-        "decision, request_id, resolves, payee, category, tool, chain, reason, "
-        "rule, context) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (timestamp, session_id, scope_id, home_scope(scope_id), action, resource,
-         amount_cents, decision, request_id, resolves, payee, category, tool,
-         None if chain is None else json.dumps(chain), reason, rule,
-         None if context is None else json.dumps(context, sort_keys=True)),
-    )
-    return cursor.lastrowid
+    return _append(conn, "events", {
+        "timestamp": timestamp,
+        "session_id": session_id,
+        "scope_id": scope_id,
+        "home": home_scope(scope_id),
+        "action": action,
+        "resource": resource,
+        "amount_cents": amount_cents,
+        "decision": decision,
+        "request_id": request_id,
+        "resolves": resolves,
+        "payee": payee,
+        "category": category,
+        "tool": tool,
+        "chain": None if chain is None else json.dumps(chain),
+        "reason": reason,
+        "rule": rule,
+        "context": None if context is None else json.dumps(context, sort_keys=True),
+    })
 
 
 # Columns read back by get_event and contract_rows, in this order.
 _ROW_COLUMNS = ("id", "timestamp", "session_id", "scope_id", "home", "action",
                 "resource", "amount_cents", "decision", "request_id", "resolves",
-                "payee", "category", "tool", "chain", "reason", "rule", "context")
+                "payee", "category", "tool", "chain", "reason", "rule", "context",
+                "row_hash")
 
 
 def _row_dict(row):
@@ -207,8 +319,7 @@ def contract_rows(conn, since=0):
     One field is added to the contract's: `resolves`, the event_id of the
     held payment this row approves or denies (None otherwise). A held row
     is settled once a later row resolves it; the held row itself never
-    changes. `explanation` and `row_hash` are None until explain.py and the
-    hash chain land.
+    changes. `explanation` is None until explain.py lands.
     """
     rows = conn.execute(
         f"SELECT {', '.join(_ROW_COLUMNS)} FROM events WHERE id > ? ORDER BY id",
@@ -231,7 +342,7 @@ def contract_rows(conn, since=0):
             "rule": event["rule"],
             "explanation": None,
             "flagged": decision != "ALLOW",
-            "row_hash": None,
+            "row_hash": event["row_hash"],
             "resolves": event["resolves"],
         })
     return out
@@ -272,19 +383,20 @@ def insert_override(conn, timestamp, scope_id, authorized_by, reason):
     events - this is the only way to un-trip a scope.
 
     The override covers every event already in the ledger and nothing
-    after it. That cut-off is read from the ledger in the same statement,
-    never from `timestamp`: a caller-supplied timestamp dated in the future
-    would otherwise cover every DENY to come and switch the breaker off for
+    after it. That cut-off is read from the ledger, never from
+    `timestamp`: a caller-supplied timestamp dated in the future would
+    otherwise cover every DENY to come and switch the breaker off for
     good, and one written as "...Z" instead of "...+00:00" sorts after a
-    DENY it actually came before.
+    DENY it actually came before. Like events, overrides are hash-chained.
     """
-    cursor = conn.execute(
-        "INSERT INTO overrides "
-        "(timestamp, scope_id, authorized_by, reason, after_event_id) "
-        "VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(id), 0) FROM events))",
-        (timestamp, normalize_scope(scope_id), authorized_by, reason),
-    )
-    return cursor.lastrowid
+    (after_event_id,) = conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()
+    return _append(conn, "overrides", {
+        "timestamp": timestamp,
+        "scope_id": normalize_scope(scope_id),
+        "authorized_by": authorized_by,
+        "reason": reason,
+        "after_event_id": after_event_id,
+    })
 
 
 def list_overrides(conn, scope_id=None):
