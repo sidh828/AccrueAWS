@@ -39,8 +39,9 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 # budget. The first is allowed, the rest are denied.
 .venv/bin/python -m guard.main
 
-# the family dashboard against a stand-in API (until guard/api.py exists):
-# open http://127.0.0.1:8001/ and watch Mom's scripted day arrive
+# the family dashboard against a stand-in API (until guard/api.py exists).
+# It prints two links: the one ending in #token=... can approve payments
+# (open it once on each device that should), the other is read-only.
 python3 dashboard/fake_api.py
 python3 dashboard/alerts.py --dry-run   # phone alerts, printed instead of sent
 ```

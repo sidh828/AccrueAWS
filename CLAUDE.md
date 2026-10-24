@@ -91,7 +91,11 @@ Response:
 - `GET /events?since=<id>` and `GET /stream` (server-sent events): rows
   ordered by `event_id`.
 - `POST /override {event_id, action: approve|deny}`: dashboard only. The
-  agent has no tool for it.
+  agent has no tool for it, and no credential: the request needs
+  `Authorization: Bearer <dashboard token>` and a JSON body, or it gets 401
+  or 415. The guard reads the token from `ACCRUE_DASHBOARD_TOKEN`, or makes
+  one up and prints the dashboard link `…/#token=<token>`. The agent's
+  process never has it, and phone alerts never carry it.
 - `GET /verify`: `{ok, first_bad_event_id}`. `POST /replay {policy}`: what
   would have changed.
 - `POST /inbound {session_id, source, content}` -> `{trusted, tainted, labels}`.

@@ -10,18 +10,26 @@ scam that switches to Zelle and a sub-agent until payments pause, then a
 plumber's bill caught in the pause. It also serves the dashboard, so one
 command runs both:
 
-    python3 dashboard/fake_api.py              # http://127.0.0.1:8001/
+    python3 dashboard/fake_api.py              # prints the dashboard link
     python3 dashboard/fake_api.py --step 1     # a new payment every second
     python3 dashboard/fake_api.py --host 0.0.0.0   # reachable from a phone
 
+Approving needs the dashboard's token, the same rule the real guard
+follows: POST /override must send `Authorization: Bearer <token>`. The token
+comes from ACCRUE_DASHBOARD_TOKEN, or is made up at startup, and the printed
+link carries it as #token=... for the dashboard to pick up. The agent never
+gets it. Reading /events and /stream needs no token.
+
 Nothing here is real: no Cedar, no money, and the hashes chain only
-within this process. /override has no login, so anything that can reach
-the port can approve; the real guard needs one.
+within this process.
 """
 
 import argparse
 import hashlib
+import hmac
 import json
+import os
+import secrets
 import threading
 import time
 from datetime import datetime, timezone
@@ -118,6 +126,7 @@ class FakeGuard:
 class Handler(BaseHTTPRequestHandler):
     guard = None  # a FakeGuard, set by make_server
     streams = None  # a semaphore capping live /stream connections, set by make_server
+    token = None  # the dashboard's secret for /override, set by make_server
     timeout = TIMEOUT
 
     def do_OPTIONS(self):
@@ -143,6 +152,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if urlparse(self.path).path != "/override":
             return self._json(404, {"error": "not found"})
+        # JSON only: a web page can send a text/plain POST to any address
+        # without asking first, and the old handler parsed it anyway. A
+        # JSON body with a token header makes the browser ask (CORS) first.
+        if self.headers.get_content_type() != "application/json":
+            return self._json(415, {"error": "the body must be JSON"})
+        if not self._from_dashboard():
+            return self._json(401, {"error": "approving needs the dashboard's token"})
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -199,9 +215,13 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             self.streams.release()
 
+    def _from_dashboard(self):
+        scheme, _, sent = self.headers.get("Authorization", "").partition(" ")
+        return scheme.lower() == "bearer" and hmac.compare_digest(sent.encode(), self.token.encode())
+
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 
     def _json(self, code, data):
@@ -219,9 +239,11 @@ class Handler(BaseHTTPRequestHandler):
         pass  # keep the terminal quiet
 
 
-def make_server(guard, host="127.0.0.1", port=8001, max_streams=MAX_STREAMS):
+def make_server(guard, token, host="127.0.0.1", port=8001, max_streams=MAX_STREAMS):
+    if not token:
+        raise ValueError("the dashboard token can't be empty")
     handler = type("BoundHandler", (Handler,), {
-        "guard": guard, "streams": threading.BoundedSemaphore(max_streams),
+        "guard": guard, "streams": threading.BoundedSemaphore(max_streams), "token": token,
     })
     return ThreadingHTTPServer((host, port), handler)
 
@@ -244,9 +266,14 @@ def main(argv=None):
     # across restarts: a dashboard or alert watcher left running doesn't
     # sit waiting for ids it has already seen.
     guard = FakeGuard(first_id=int(time.time() * 1000))
-    server = make_server(guard, args.host, args.port)
+    token = os.environ.get("ACCRUE_DASHBOARD_TOKEN") or secrets.token_urlsafe(24)
+    server = make_server(guard, token, args.host, args.port)
     threading.Thread(target=play, args=(guard, args.step), daemon=True).start()
-    print(f"dashboard on http://{args.host}:{args.port}/  (Ctrl-C to stop)")
+    base = f"http://{args.host}:{args.port}/"
+    print(f"dashboard, can approve:  {base}#token={token}")
+    print(f"dashboard, read-only:    {base}")
+    print("(open the first link once on each device that should approve; Ctrl-C to stop)",
+          flush=True)  # show the links even when output goes to a file
     try:
         server.serve_forever()
     except KeyboardInterrupt:

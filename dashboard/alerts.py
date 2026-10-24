@@ -165,6 +165,10 @@ def main(argv=None):
     topic = os.environ.get("NTFY_TOPIC")
     if not topic and not args.dry_run:
         parser.error("set NTFY_TOPIC, or use --dry-run")
+    if "token=" in args.open:
+        # Alerts go through ntfy.sh, where anyone who knows the topic can
+        # read them, so a link that can approve payments must never ride along.
+        parser.error("--open must not carry the dashboard token; use the read-only link")
 
     def deliver(alert):
         if args.dry_run:
