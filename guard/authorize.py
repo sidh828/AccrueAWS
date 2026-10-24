@@ -13,6 +13,7 @@ exists to close. See PRIMER.md §1.4.
 
 import json
 import math
+import os
 import subprocess
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -27,6 +28,15 @@ POLICY_PATH = Path(__file__).parent / "policies" / "budget.cedar"
 # 12:01 AM would both fit. Without any window, a home that spent its budget
 # once was locked out forever.
 BUDGET_WINDOW = timedelta(hours=24)
+
+# The Cedar CLI to run. Overridable so a demo or a test can point it at a
+# binary that hangs or is missing and show the guard failing closed.
+CEDAR_BIN = os.environ.get("ACCRUE_CEDAR_BIN", "cedar")
+
+# A clean Cedar call takes a few milliseconds. The call runs while
+# authorize_transfer holds the ledger's write lock, so a hung Cedar with no
+# timeout blocked every other request until it got "database is locked".
+CEDAR_TIMEOUT_SECONDS = 2.0
 
 
 def _entity_uid(entity_type, entity_id):
@@ -70,20 +80,29 @@ def _ask_cedar(principal, action, resource, context):
         context_path.write_text(json.dumps(context))
         entities_path.write_text("[]")
 
-        result = subprocess.run(
-            [
-                "cedar",
-                "authorize",
-                "--policies", str(POLICY_PATH),
-                "--entities", str(entities_path),
-                "--principal", principal,
-                "--action", action,
-                "--resource", resource,
-                "--context", str(context_path),
-            ],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                [
+                    CEDAR_BIN,
+                    "authorize",
+                    "--policies", str(POLICY_PATH),
+                    "--entities", str(entities_path),
+                    "--principal", principal,
+                    "--action", action,
+                    "--resource", resource,
+                    "--context", str(context_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=CEDAR_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            # run() has already killed the process. Raising rolls back
+            # authorize_transfer's transaction and releases the lock;
+            # nothing is logged and nothing is allowed.
+            raise RuntimeError(
+                f"cedar authorize timed out after {CEDAR_TIMEOUT_SECONDS}s"
+            ) from None
         # The CLI exits 0 for ALLOW and 2 for DENY - both are real decisions.
         # Anything else (bad policy file, malformed context, ...) is a tool
         # failure and must not be silently treated as a DENY decision.

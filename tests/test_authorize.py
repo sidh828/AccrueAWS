@@ -3,6 +3,7 @@ the thing that actually keeps score, and that it fails closed rather than
 open when Cedar can't be trusted.
 """
 
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -253,6 +254,31 @@ def test_cedar_policy_error_fails_closed():
             'Account::"acct-1234"',
             {"cumulative_kost": 50000},  # typo: not a real context attribute
         )
+
+
+def test_a_hung_cedar_times_out_and_releases_the_lock(tmp_path, monkeypatch):
+    """Regression test: the Cedar call had no timeout and runs while the
+    ledger's write lock is held, so a hung Cedar blocked every other
+    request (they failed with "database is locked" after 5 s) and never
+    returned itself. It now times out, logs nothing, and lets the next
+    request through."""
+    hung = tmp_path / "cedar"
+    hung.write_text("#!/bin/sh\nexec sleep 30\n")  # exec: the kill reaches sleep
+    hung.chmod(0o755)
+    monkeypatch.setattr(authorize, "CEDAR_BIN", str(hung))
+    monkeypatch.setattr(authorize, "CEDAR_TIMEOUT_SECONDS", 0.3)
+
+    db_path = str(tmp_path / "ledger.db")
+    conn = ledger.connect(db_path)
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="timed out"):
+        authorize.authorize_transfer(conn, "sess-001", "acct-1234", 100)
+    assert time.monotonic() - started < 5
+    assert ledger.list_events(conn) == []
+
+    monkeypatch.setattr(authorize, "CEDAR_BIN", "cedar")
+    other = ledger.connect(db_path)
+    assert authorize.authorize_transfer(other, "sess-002", "acct-1234", 100) == "ALLOW"
 
 
 def test_clean_allow_and_deny_still_work():
