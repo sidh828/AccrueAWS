@@ -1,10 +1,13 @@
 """The guard's HTTP API: CLAUDE.md's interface contract over the real
 ledger and Cedar.
 
-    POST /authorize          agent -> guard: may this payment happen?
+    POST /authorize          agent -> guard: may this payment happen? (with "token":
+                             a signed delegation, guard/tokens.py)
     POST /inbound            agent -> walls: {session_id, source, content}
     POST /outbound           agent -> walls: {session_id, recipient, channel, content}
     POST /override           dashboard only: {event_id, action: approve|deny}
+    POST /replay             dashboard only: {policy, since?} -> what a draft rule
+                             would have changed (guard/replay.py)
     GET  /events?since=<id>  payments, oldest first
     GET  /stream             the same, live, as server-sent events
     GET  /verify             {ok, first_bad_event_id, first_bad_override_id, head}
@@ -64,7 +67,7 @@ from walls.outbound import OutboundWall
 from walls.secrets import SecretStore
 from walls.storage import WallStateStore
 
-from . import authorize, ledger
+from . import authorize, ledger, replay, tokens
 
 DASHBOARD = Path(__file__).parent.parent / "dashboard"
 STATIC = {
@@ -72,7 +75,7 @@ STATIC = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
 }
-MAX_BODY = 10_000  # bytes; an /authorize body is a few hundred
+MAX_BODY = 64_000  # bytes; /authorize is a few hundred, a /replay draft a whole policy
 MAX_STREAMS = 50  # live /stream connections at once
 TIMEOUT = 30  # seconds before a stalled connection is dropped
 STREAM_POLL = 1.0  # seconds between ledger checks when nothing woke a stream
@@ -84,6 +87,7 @@ ROLE_PERMISSIONS = {
     ("POST", "/inbound"): frozenset({"agent", "admin"}),
     ("POST", "/outbound"): frozenset({"agent", "admin"}),
     ("POST", "/override"): frozenset({"approver", "admin"}),
+    ("POST", "/replay"): frozenset({"approver", "admin"}),
 }
 REQUIRED_ROLES = frozenset({"agent", "viewer", "approver"})
 
@@ -96,15 +100,34 @@ UNAVAILABLE = {"decision": "hold", "rule": authorize.GUARD_UNAVAILABLE,
                "needs_approval": True, "event_id": None}
 
 
-def answer_authorize(open_ledger, body, sessions, now=None):
+def answer_authorize(open_ledger, body, sessions, now=None, token_key=None,
+                     require_token=False):
     """POST /authorize's answer as (http_status, body), shared with
     guard.local.LocalGuard so the in-process guard behaves exactly like the
     server. `open_ledger()` returns a context manager yielding a
-    connection; `sessions` has is_tainted(session_id)."""
-    missing = [f for f in REQUIRED if f not in body]
+    connection; `sessions` has is_tainted(session_id).
+
+    A request's "token" (guard/tokens.py) is verified with `token_key`; the
+    chain then comes from the token and the request's own is ignored, as
+    the contract says. A forged, altered or expired token is a 401. With
+    `require_token`, so is a request without one."""
+    token = body.get("token")
+    delegation = None
+    if token:
+        try:
+            delegation = tokens.verify(token_key, token,
+                                       ledger.utc_timestamp(now) if now else None)
+        except tokens.TokenError as err:
+            return 401, {"error": f"bad delegation token: {err}"}
+    elif require_token:
+        return 401, {"error": "a signed delegation token is required"}
+    missing = [f for f in REQUIRED if f not in body and not (f == "chain" and delegation)]
     if missing:
         return 400, {"error": f"missing {', '.join(missing)}"}
     kwargs = {f: body[f] for f in REQUIRED + OPTIONAL if f in body}
+    if delegation is not None:
+        kwargs["chain"] = list(delegation.chain)
+        kwargs["delegation"] = delegation
     session_id = body["session_id"]
     kwargs["tainted"] = body.get("tainted") is True or (
         isinstance(session_id, str) and sessions.is_tainted(session_id)
@@ -167,6 +190,8 @@ class Handler(BaseHTTPRequestHandler):
     db_path = None
     role_tokens = None
     sessions = None  # walls.inbound.SessionStore: taint, shared with /inbound
+    token_key = None  # verifies delegation tokens (guard/tokens.py)
+    require_token = False
     inbound_wall = None
     outbound_wall = None
     streams = None  # a semaphore capping live /stream connections
@@ -223,7 +248,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/authorize", "/override", "/inbound", "/outbound"):
+        if path not in ("/authorize", "/override", "/inbound", "/outbound", "/replay"):
             return self._json(404, {"error": "not found"})
         role = self._authenticated_role("POST", path)
         if role is None:
@@ -241,6 +266,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._inbound(body)
         if path == "/outbound":
             return self._outbound(body)
+        if path == "/replay":
+            return self._replay(body)
         return self._override(body)
 
     def _authenticated_role(self, method, path):
@@ -260,14 +287,21 @@ class Handler(BaseHTTPRequestHandler):
             self._unauthorized()
             return None
         if role not in permissions:
-            self._json(403, {"error": "this role cannot access the requested resource"})
+            self._auth_error(403, {"error": "this role cannot access the requested resource"})
             return None
         return role
 
     def _unauthorized(self):
-        body = json.dumps({"error": "a valid bearer credential is required"}).encode()
-        self.send_response(401)
-        self.send_header("WWW-Authenticate", "Bearer")
+        self._auth_error(401, {"error": "a valid bearer credential is required"},
+                         authenticate=True)
+
+    def _auth_error(self, status, data, authenticate=False):
+        body = json.dumps(data).encode()
+        self.close_connection = True
+        self.send_response(status)
+        if authenticate:
+            self.send_header("WWW-Authenticate", "Bearer")
+        self.send_header("Connection", "close")
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self._cors()
@@ -275,7 +309,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _authorize(self, body):
-        status, response = answer_authorize(self._ledger, body, self.sessions)
+        status, response = answer_authorize(self._ledger, body, self.sessions,
+                                            token_key=self.token_key,
+                                            require_token=self.require_token)
         if status == 200:
             self._wake_streams()
         self._json(status, response)
@@ -293,6 +329,18 @@ class Handler(BaseHTTPRequestHandler):
                                              "content} as strings"})
         self._json(200, self.outbound_wall.check(body["session_id"], body["recipient"],
                                                  body["channel"], body["content"]))
+
+    def _replay(self, body):
+        policy, since = body.get("policy"), body.get("since")
+        if not isinstance(policy, str) or not policy.strip() or (
+                since is not None and not isinstance(since, str)):
+            return self._json(400, {"error": "expected {policy: cedar text, since?: timestamp}"})
+        with self._ledger() as conn:
+            try:
+                result = replay.replay(conn, policy, since=since)
+            except replay.DraftError as err:
+                return self._json(400, {"error": f"the draft rule isn't valid: {err}"})
+        self._json(200, result)
 
     def _override(self, body):
         event_id, action = body.get("event_id"), body.get("action")
@@ -412,14 +460,19 @@ class _Connection:
 
 
 def make_server(db_path, token=None, host="127.0.0.1", port=8000, wall_key=None,
-                contacts=None, max_streams=MAX_STREAMS, role_tokens=None):
+                contacts=None, max_streams=MAX_STREAMS, role_tokens=None,
+                token_key=None, require_token=False):
     """A server for the ledger at `db_path`. `token` is a legacy alias for
     the approver credential. `wall_key` (32+ bytes) keys the walls' stored
     digests of received codes; with it, taint and received codes are kept
     in the database and survive a restart, without it they live in memory.
     `contacts` are the recipients /outbound always allows. The agent, viewer,
-    and approver credentials are required; the admin credential is optional."""
+    and approver credentials are required; the admin credential is optional.
+    `token_key` verifies delegation tokens, and `require_token` rejects
+    /authorize requests without a valid delegation token."""
     role_tokens = _validated_role_tokens(role_tokens, token)
+    if require_token and not token_key:
+        raise ValueError("requiring tokens needs a token key")
     storage = None
     if wall_key is not None:
         key = wall_key.encode() if isinstance(wall_key, str) else wall_key
@@ -434,6 +487,7 @@ def make_server(db_path, token=None, host="127.0.0.1", port=8000, wall_key=None,
     conn.close()
     handler = type("BoundHandler", (Handler,), {
         "db_path": db_path, "role_tokens": role_tokens, "sessions": sessions,
+        "token_key": token_key, "require_token": require_token,
         "inbound_wall": InboundWall(sessions, secrets_store),
         "outbound_wall": OutboundWall(secrets_store, sessions, contacts=contacts or set()),
         "streams": threading.BoundedSemaphore(max_streams),
@@ -494,10 +548,13 @@ def main(argv=None):
         "admin": os.environ.get("ACCRUE_ADMIN_TOKEN"),
     }
     wall_key = os.environ.get("ACCRUE_WALL_KEY")
+    token_key = os.environ.get("ACCRUE_TOKEN_KEY")
+    require_token = os.environ.get("ACCRUE_REQUIRE_TOKENS") == "1"
     contacts = {c.strip() for c in os.environ.get("ACCRUE_ALLOWED_CONTACTS", "").split(",")
                 if c.strip()}
     server = make_server(args.db, host=args.host, port=args.port, wall_key=wall_key,
-                         contacts=contacts, role_tokens=role_tokens)
+                         contacts=contacts, role_tokens=role_tokens,
+                         token_key=token_key, require_token=require_token)
     base = f"http://{args.host}:{args.port}/"
     print(f"guard API on {base}  (ledger: {args.db})")
     print(f"dashboard, can approve:  {base}#token={role_tokens['approver']}")
@@ -506,6 +563,10 @@ def main(argv=None):
         print("admin bearer credential configured; do not share it with the browser")
     if not os.environ.get("ACCRUE_LEDGER_KEY"):
         print("note: ACCRUE_LEDGER_KEY isn't set, so the ledger is hashed without a key")
+    if not token_key:
+        print("note: ACCRUE_TOKEN_KEY isn't set, so agents' delegation tokens can't be checked")
+    elif not require_token:
+        print("note: ACCRUE_REQUIRE_TOKENS isn't 1, so requests without a token are accepted")
     if not wall_key:
         print("note: ACCRUE_WALL_KEY isn't set, so taint and received codes are kept in "
               "memory and forgotten on restart")

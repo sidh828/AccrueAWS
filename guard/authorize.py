@@ -325,6 +325,8 @@ FAMILY_LIMITS = {
 # treated as a deny, so adding one to the policy can't fail open
 # (tests/test_family.py checks the two stay in step).
 RULE_OUTCOMES = {
+    "delegation_tool": "deny",
+    "delegation_budget": "deny",
     "gift_card_daily_cap": "deny",
     "new_payee_cap": "deny",
     "daily_cap": "deny",
@@ -392,9 +394,11 @@ def _response(event_id, decision, rule, context):
     }
 
 
-def _decide(context, policy_path):
+def _decide(context, policy_path, outcomes=None):
     """Ask Cedar about one payment. Returns ("ALLOW" | "DENY" | "HOLD", rule).
-    Anything that stops Cedar from answering cleanly is a HOLD."""
+    Anything that stops Cedar from answering cleanly is a HOLD. `outcomes`
+    replaces RULE_OUTCOMES (guard/replay.py passes a draft's)."""
+    outcomes = RULE_OUTCOMES if outcomes is None else outcomes
     try:
         decision, fired = _run_cedar(
             _entity_uid("Person", context["person"]),
@@ -410,9 +414,9 @@ def _decide(context, policy_path):
     if decision == "ALLOW":
         return "ALLOW", None
 
-    order = list(RULE_OUTCOMES)
+    order = list(outcomes)
     fired = sorted(fired, key=lambda r: order.index(r) if r in order else -1)
-    denies = [r for r in fired if RULE_OUTCOMES.get(r, "deny") == "deny"]
+    denies = [r for r in fired if outcomes.get(r, "deny") == "deny"]
     if denies:
         return "DENY", denies[0]
     if fired:
@@ -422,7 +426,7 @@ def _decide(context, policy_path):
 
 def authorize_payment(conn, *, person, chain, tool, amount_cents, payee, category,
                       session_id, request_id=None, reason=None, tainted=False,
-                      policy_path=None, now=None):
+                      policy_path=None, now=None, delegation=None):
     """Ask "can Mom's agent make this payment?" under the family's spending
     rules, log the answer, and return CLAUDE.md's /authorize response:
     decision ("allow", "deny" or "hold"), the rule that decided it, the
@@ -443,6 +447,12 @@ def authorize_payment(conn, *, person, chain, tool, amount_cents, payee, categor
 
     `now` (a timezone-aware datetime) replaces the clock, for replaying a
     simulated month (guard/sim.py). The API never passes it.
+
+    `delegation` is a verified token (guard.tokens.Delegation). With one,
+    the chain is the token's - the request's own chain must match it - and
+    the token's tools and branch budgets are enforced: each budget is what
+    that branch of the chain may spend in 24 hours, and the tightest left
+    applies (delegation_budget, delegation_tool).
     """
     if type(amount_cents) is not int or not 0 <= amount_cents <= MAX_AMOUNT_CENTS:
         raise ValueError(
@@ -460,6 +470,10 @@ def authorize_payment(conn, *, person, chain, tool, amount_cents, payee, categor
     if chain[0] != person:
         raise ValueError(
             f"chain must start with the person paying ({person!r}), got {chain!r}"
+        )
+    if delegation is not None and tuple(chain) != delegation.chain:
+        raise ValueError(
+            f"the token was issued to {'/'.join(delegation.chain)!r}, not {'/'.join(chain)!r}"
         )
     payee = _clean_name("payee", payee)
     category = _clean_name("category", category)
@@ -498,6 +512,13 @@ def authorize_payment(conn, *, person, chain, tool, amount_cents, payee, categor
                 conn, person, payee, ledger.utc_timestamp(now - KNOWN_BILL_LOOKBACK)
             )
         known_bill = last_bill is not None
+        headroom = MAX_AMOUNT_CENTS
+        for depth, budget in (delegation.budgets if delegation else ()):
+            branch = "/".join(chain[:depth + 1])
+            spent = aggregates.cumulative_cost_for_scope(conn, branch, since=day_since)
+            headroom = min(headroom, max(budget - spent, 0))
+        tools = sorted(TOOL_CATEGORIES if delegation is None or delegation.tools is None
+                       else delegation.tools)
         first = aggregates.first_paid(conn, person, payee)
         new_payee = first is None
         recent_payee = not new_payee and first >= recent_since
@@ -505,6 +526,7 @@ def authorize_payment(conn, *, person, chain, tool, amount_cents, payee, categor
             "person": person,
             "payee": payee,
             "amount": amount_cents,
+            "tool": tool,
             "is_gift_card": is_gift_card,
             "tainted": tainted,
             # Known bills and family-approved payments are left out of the
@@ -523,6 +545,8 @@ def authorize_payment(conn, *, person, chain, tool, amount_cents, payee, categor
             "last_bill": last_bill or 0,
             "recent_denials": aggregates.denials_since(
                 conn, person, ledger.utc_timestamp(now - BREAKER_WINDOW)),
+            "delegated_tools": tools,
+            "delegation_headroom": headroom,
             "limits": FAMILY_LIMITS,
         }
         decision, rule = _decide(context, policy_path)

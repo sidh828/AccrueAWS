@@ -93,6 +93,13 @@ def test_only_approver_and_admin_reach_override_validation(server):
         assert call(server, "POST", "/override", role=role, body={})[0] == 400
 
 
+def test_only_approver_and_admin_can_run_policy_replay(server):
+    for role in ("agent", "viewer"):
+        assert call(server, "POST", "/replay", role=role, body={})[0] == 403
+    for role in ("approver", "admin"):
+        assert call(server, "POST", "/replay", role=role, body={})[0] == 400
+
+
 def test_agent_and_admin_can_reach_authorization_validation(server):
     assert call(server, "POST", "/authorize", role="viewer", body={})[0] == 403
     assert call(server, "POST", "/authorize", role="agent", body={})[0] == 400

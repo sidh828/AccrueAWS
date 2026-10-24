@@ -143,9 +143,17 @@ def utc_timestamp(moment=None):
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+# How long a connection waits for another's write lock before giving up
+# with "database is locked". Each decision holds the lock for milliseconds
+# (Cedar's own timeout caps it at 2 s), so a burst of requests queues up
+# behind each other; SQLite's default of 5 s was too short for 60 at once on
+# a slow CI runner. Giving up is still safe - the API answers it as a hold.
+BUSY_TIMEOUT_SECONDS = 15
+
+
 def connect(db_path="ledger.db"):
     """Open a ledger database and create its schema if needed."""
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=BUSY_TIMEOUT_SECONDS)
     conn.executescript(SCHEMA)
     conn.commit()
     return conn

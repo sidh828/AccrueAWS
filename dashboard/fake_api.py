@@ -73,6 +73,19 @@ SCRIPT = [
 ]
 STATUS = {"allow": "allowed", "deny": "released", "hold": "held"}
 
+DEMO_SCENARIOS = {
+    "normal_day": SCRIPT[:2],
+    "gift_card_scam": SCRIPT[2:4],
+    "channel_switch": SCRIPT[4:6],
+    "held_bill": SCRIPT[6:7],
+}
+
+DEMO_ORDER = [
+    "normal_day",
+    "gift_card_scam",
+    "channel_switch",
+    "held_bill",
+]
 
 class FakeGuard:
     """Event rows in memory, plus a feed of every row as it was added or
@@ -84,6 +97,9 @@ class FakeGuard:
         self.cond = threading.Condition()
         self._first_id = first_id
         self._prev_hash = "0" * 64
+        self.demo_running = False
+        self.demo_enabled = False
+        self.demo_next_index = 0
 
     def add(self, tool, amount_cents, payee, category, chain, decision, rule, explanation):
         with self.cond:
@@ -136,6 +152,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         url = urlparse(self.path)
+        if url.path == "/demo/status":
+            with self.guard.cond:
+                return self._json(200, {
+                    "running": self.guard.demo_running,
+                    "enabled": self.guard.demo_enabled,
+                })
         if url.path in STATIC:
             name, content_type = STATIC[url.path]
             return self._send(200, (HERE / name).read_bytes(), content_type)
@@ -154,6 +176,8 @@ class Handler(BaseHTTPRequestHandler):
         self._json(404, {"error": "not found"})
 
     def do_POST(self):
+        if urlparse(self.path).path == "/demo/run":
+            return self._run_demo()
         if urlparse(self.path).path != "/override":
             return self._json(404, {"error": "not found"})
         # JSON only: a web page can send a text/plain POST to any address
@@ -183,6 +207,82 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as err:
             self._json(409, {"error": str(err)})
 
+    
+    def _run_demo(self):
+        # Simulator is available only in manual mode.
+        if not self.guard.demo_enabled:
+            return self._json(
+                409, {"error": "Start the server with --manual"}
+            )
+
+        # Same token protection as /override.
+        if self.headers.get_content_type() != "application/json":
+            return self._json(415, {"error": "JSON required"})
+
+        if not self._from_dashboard():
+            return self._json(401, {"error": "Dashboard token required"})
+
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+
+            if not 0 < length <= MAX_BODY:
+                return self._json(413, {"error": "Invalid body size"})
+
+            body = json.loads(self.rfile.read(length))
+            scenario = body.get("scenario") if isinstance(body, dict) else None
+
+        except (ValueError, TypeError):
+            return self._json(400, {"error": "Invalid request"})
+
+        if not isinstance(scenario, str) or scenario not in DEMO_SCENARIOS:
+            return self._json(400, {"error": "Unknown scenario"})
+
+        with self.guard.cond:
+            if self.guard.demo_running:
+                return self._json(409, {
+                    "error": "Demo already running"
+                })
+
+            if self.guard.demo_next_index >= len(DEMO_ORDER):
+                return self._json(409, {
+                    "error": "Demo complete. Reset to run again."
+                })
+
+            expected = DEMO_ORDER[self.guard.demo_next_index]
+
+            if scenario != expected:
+                return self._json(409, {
+                    "error": f"Run {expected} next"
+                })
+
+            self.guard.demo_running = True
+
+        def run_scenario():
+            completed = False
+
+            try:
+                for row in DEMO_SCENARIOS[scenario]:
+                    time.sleep(1.5)
+                    self.guard.add(*row)
+
+                completed = True
+
+            finally:
+                with self.guard.cond:
+                    if completed:
+                        self.guard.demo_next_index += 1
+
+                    self.guard.demo_running = False
+
+
+        threading.Thread(
+            target=run_scenario,
+            daemon=True
+        ).start()
+
+        return self._json(202, {"started": scenario})
+
+    
     def _stream(self):
         # Parsed before any header goes out: "²" passes isdigit() but not int().
         try:
@@ -262,17 +362,23 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Fake guard API that also serves the dashboard")
     parser.add_argument("--host", default="127.0.0.1", help="0.0.0.0 to open it from a phone")
     parser.add_argument("--port", type=int, default=8001)
-    parser.add_argument("--step", type=float, default=3.0,
-                        help="seconds between scripted payments (default 3)")
+    parser.add_argument("--step", type=float, default=3.0, help="seconds between scripted payments (default 3)")
+    parser.add_argument("--manual", action="store_true", help="Wait for manually triggered demo scenarios")
     args = parser.parse_args(argv)
 
     # Ids start at the current time in milliseconds, so they keep rising
     # across restarts: a dashboard or alert watcher left running doesn't
     # sit waiting for ids it has already seen.
     guard = FakeGuard(first_id=int(time.time() * 1000))
+    guard.demo_enabled = args.manual
     token = os.environ.get("ACCRUE_DASHBOARD_TOKEN") or secrets.token_urlsafe(24)
     server = make_server(guard, token, args.host, args.port)
-    threading.Thread(target=play, args=(guard, args.step), daemon=True).start()
+    if not args.manual:
+        threading.Thread(
+        target=play,
+        args=(guard, args.step),
+        daemon=True
+    ).start()
     base = f"http://{args.host}:{args.port}/"
     print(f"dashboard, can approve:  {base}#token={token}")
     print(f"dashboard, read-only:    {base}")
