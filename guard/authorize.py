@@ -12,7 +12,6 @@ exists to close. See PRIMER.md §1.4.
 """
 
 import json
-import math
 import os
 import subprocess
 import tempfile
@@ -38,6 +37,10 @@ CEDAR_BIN = os.environ.get("ACCRUE_CEDAR_BIN", "cedar")
 # timeout blocked every other request until it got "database is locked".
 CEDAR_TIMEOUT_SECONDS = 2.0
 
+# $10 billion. Anything bigger is a bug or an attack, and the running total
+# has to stay well inside Cedar's 64-bit Long.
+MAX_AMOUNT_CENTS = 10**12
+
 
 def _entity_uid(entity_type, entity_id):
     """Build a Cedar entity UID like Account::"acct-1234" from an
@@ -58,8 +61,27 @@ def _entity_uid(entity_type, entity_id):
     return f'{entity_type}::"{escaped}"'
 
 
-def _ask_cedar(principal, action, resource, context):
-    """Shell out to the `cedar` CLI and return "ALLOW" or "DENY".
+def _ask_cedar(principal, action, resource, context, policy_path=None):
+    """Shell out to the `cedar` CLI and return "ALLOW" or "DENY", under
+    `policy_path` (default: POLICY_PATH). See _run_cedar."""
+    decision, _ = _run_cedar(principal, action, resource, context, policy_path)
+    return decision
+
+
+# What `cedar authorize -v` prints between the decision and the ids of the
+# policies that decided it.
+_CEDAR_REASONS_HEADER = "note: this decision was due to the following policies:"
+
+
+def _run_cedar(principal, action, resource, context, policy_path=None,
+               schema_path=None, verbose=False):
+    """Shell out to the `cedar` CLI. Returns (decision, policy_ids):
+    "ALLOW" or "DENY", and - with `verbose` - the ids of the policies that
+    decided it (each policy's @id). Without `verbose` the ids are [].
+
+    With `schema_path`, Cedar checks the request against the schema before
+    evaluating it, so a context with a missing or misspelled attribute is
+    rejected outright instead of reaching a policy.
 
     Cedar does not abort when a policy errors while being evaluated (e.g. a
     context attribute typo'd in a `when` clause, or a request built with a
@@ -68,8 +90,9 @@ def _ask_cedar(principal, action, resource, context):
     references a bad attribute can be silently skipped and a `permit`
     elsewhere wins by default. The CLI still exits 0 for that case; the only
     sign anything went wrong is extra text on stdout after the decision
-    word. A clean decision is *only* "ALLOW" or "DENY" - anything else means
-    a policy errored and the decision can't be trusted, so this raises
+    word. A clean answer is *only* "ALLOW" or "DENY", plus with `verbose`
+    the reasons header and a list of policy ids - anything else means a
+    policy errored and the decision can't be trusted, so this raises
     instead of returning it. `cedar validate` (run in CI against
     budget.cedarschema) is what's supposed to catch these before they ship;
     this check is the last line of defense if one gets through anyway.
@@ -80,18 +103,23 @@ def _ask_cedar(principal, action, resource, context):
         context_path.write_text(json.dumps(context))
         entities_path.write_text("[]")
 
+        command = [
+            CEDAR_BIN,
+            "authorize",
+            "--policies", str(policy_path or POLICY_PATH),
+            "--entities", str(entities_path),
+            "--principal", principal,
+            "--action", action,
+            "--resource", resource,
+            "--context", str(context_path),
+        ]
+        if schema_path is not None:
+            command += ["--schema", str(schema_path)]
+        if verbose:
+            command.append("--verbose")
         try:
             result = subprocess.run(
-                [
-                    CEDAR_BIN,
-                    "authorize",
-                    "--policies", str(POLICY_PATH),
-                    "--entities", str(entities_path),
-                    "--principal", principal,
-                    "--action", action,
-                    "--resource", resource,
-                    "--context", str(context_path),
-                ],
+                command,
                 capture_output=True,
                 text=True,
                 timeout=CEDAR_TIMEOUT_SECONDS,
@@ -107,19 +135,34 @@ def _ask_cedar(principal, action, resource, context):
         # Anything else (bad policy file, malformed context, ...) is a tool
         # failure and must not be silently treated as a DENY decision.
         if result.returncode not in (0, 2):
-            raise RuntimeError(f"cedar authorize failed: {result.stderr}")
+            # The CLI prints most failures to stdout, not stderr.
+            raise RuntimeError(
+                f"cedar authorize failed: {(result.stderr or result.stdout).strip()}"
+            )
 
-        decision = result.stdout.strip()
-        if decision not in ("ALLOW", "DENY"):
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        decision, rest = (lines[0], lines[1:]) if lines else ("", [])
+        policy_ids = []
+        if verbose and rest and rest[0] == _CEDAR_REASONS_HEADER:
+            policy_ids = rest[1:]
+            rest = [] if all(_is_policy_id(p) for p in policy_ids) else rest
+        if decision not in ("ALLOW", "DENY") or rest:
             raise RuntimeError(
                 "cedar authorize returned more than a clean decision - a "
                 "policy likely errored while evaluating and was silently "
-                f"dropped, so this can't be trusted: {decision!r}"
+                f"dropped, so this can't be trusted: {result.stdout.strip()!r}"
             )
-        return decision
+        return decision, policy_ids
 
 
-def authorize_transfer(conn, session_id, resource, amount_usd, scope_id=None):
+def _is_policy_id(text):
+    """A bare @id like "daily_cap" - not an error message that happened to
+    land in the list."""
+    return text.replace("_", "").replace("-", "").isalnum()
+
+
+def authorize_transfer(conn, session_id, resource, amount_cents, scope_id=None,
+                       request_id=None, policy_path=None):
     """Ask "can this transfer happen?", accounting for everything this
     scope has already spent - across every session under it, not just this
     one. Returns "ALLOW" or "DENY" and logs the attempt either way — only
@@ -143,16 +186,31 @@ def authorize_transfer(conn, session_id, resource, amount_usd, scope_id=None):
     integrator, not the agent, sets the home segment; an agent that can
     choose its own home can still get a fresh budget per home.
 
-    `amount_usd` must be a finite, non-negative number. A negative amount
-    would be ALLOWed (it only lowers prospective_total) and then logged as
-    an ALLOW row that subtracts from every future cumulative total - a
-    -$50,000 "transfer" buys $50,000 of extra headroom. That's malformed
-    input, not a decision, so it raises rather than returning DENY.
+    `amount_cents` must be a non-negative int, at most MAX_AMOUNT_CENTS.
+    Money is integer cents everywhere (CLAUDE.md), so a float, a bool or a
+    string is malformed input, not a decision: it raises rather than
+    returning DENY, and nothing is logged. A negative amount would be
+    ALLOWed (it only lowers prospective_total) and then logged as an ALLOW
+    row that subtracts from every future total - a -$50,000 "transfer"
+    buys $50,000 of extra headroom.
+
+    `request_id` makes a retry safe. If an event with this request_id is
+    already in the ledger, its decision is returned and nothing new is
+    logged, so an agent that times out and asks again isn't counted (or
+    paid) twice. Reusing a request_id for a different request raises.
+
+    `policy_path` is the Cedar policy to decide under (default:
+    POLICY_PATH), so a draft policy can be checked beside the live one.
     """
-    if not math.isfinite(amount_usd) or amount_usd < 0:
+    # type() rather than isinstance(): bool is a subclass of int, and True
+    # is not one cent.
+    if type(amount_cents) is not int or not 0 <= amount_cents <= MAX_AMOUNT_CENTS:
         raise ValueError(
-            f"amount_usd must be a finite, non-negative number, got {amount_usd!r}"
+            "amount_cents must be an int between 0 and "
+            f"{MAX_AMOUNT_CENTS}, got {amount_cents!r}"
         )
+    if request_id is not None and (type(request_id) is not str or not request_id):
+        raise ValueError(f"request_id must be a non-empty string, got {request_id!r}")
 
     # Built before the transaction opens, so a malformed id raises without
     # logging anything - same as a bad amount.
@@ -177,6 +235,22 @@ def authorize_transfer(conn, session_id, resource, amount_usd, scope_id=None):
 
     conn.execute("BEGIN IMMEDIATE")
     try:
+        # Checked inside the lock, so two copies of one request racing each
+        # other can't both miss the first one's row.
+        if request_id is not None:
+            prior = ledger.find_by_request_id(conn, request_id)
+            if prior is not None:
+                _, p_session, p_scope, p_resource, p_amount, p_decision = prior
+                if (p_session, p_scope, p_resource, p_amount) != (
+                    session_id, ledger.normalize_scope(scope_id), resource, amount_cents
+                ):
+                    raise ValueError(
+                        f"request_id {request_id!r} was already used for a "
+                        "different request"
+                    )
+                conn.rollback()
+                return p_decision
+
         now = datetime.now(timezone.utc)
         timestamp = ledger.utc_timestamp(now)
 
@@ -187,8 +261,8 @@ def authorize_transfer(conn, session_id, resource, amount_usd, scope_id=None):
         # against the home resets it.
         if breaker.is_tripped(conn, home):
             ledger.insert_event(
-                conn, timestamp, session_id, "transfer", resource, amount_usd,
-                "DENY", scope_id=scope_id,
+                conn, timestamp, session_id, "transfer", resource, amount_cents,
+                "DENY", scope_id=scope_id, request_id=request_id,
             )
             conn.commit()
             return "DENY"
@@ -196,31 +270,267 @@ def authorize_transfer(conn, session_id, resource, amount_usd, scope_id=None):
         already_spent = aggregates.cumulative_cost_for_scope(
             conn, home, since=ledger.utc_timestamp(now - BUDGET_WINDOW)
         )
-        prospective_total = already_spent + amount_usd
 
+        # Integer cents in, integer cents to Cedar: its JSON has only Long
+        # integers, so there's no rounding left to get wrong.
         decision = _ask_cedar(
             principal,
             'Action::"transfer"',
             account,
-            # Cedar's JSON format has no float type - only Long integers -
-            # so `cumulative_cost` (a REAL column, always a float in Python)
-            # has to be rounded to whole dollars before it crosses the CLI
-            # boundary, or the request is rejected outright as malformed.
-            # Rounded *up*, never to nearest: round() turned 10000.4 into
-            # 10000, which passes `> 10000`. Snapping to cents first keeps
-            # float drift (100,000 x $0.10 sums to 10000.000000018848) from
-            # being rounded up into a DENY for a total that's exactly at
-            # the cap. The cost: an overage under half a cent (10000.004)
-            # still snaps back to 10000 and is ALLOWed.
-            {"cumulative_cost": math.ceil(round(prospective_total, 2))},
+            {"cumulative_cost": already_spent + amount_cents},
+            policy_path=policy_path,
         )
 
         ledger.insert_event(
-            conn, timestamp, session_id, "transfer", resource, amount_usd,
-            decision, scope_id=scope_id,
+            conn, timestamp, session_id, "transfer", resource, amount_cents,
+            decision, scope_id=scope_id, request_id=request_id,
         )
         conn.commit()
         return decision
+    except Exception:
+        conn.rollback()
+        raise
+
+
+# --- Family payments ------------------------------------------------------
+#
+# The guard in front of Mom's money (CLAUDE.md). authorize_transfer above is
+# the original accrue check - one cumulative cap - and stays as it was.
+# authorize_payment applies the family's spending rules in family.cedar and
+# can answer allow, deny or hold. A hold waits for the family: resolve()
+# approves or denies it by appending a row. The assumptions behind the
+# outcomes are posted on issue #1.
+
+FAMILY_POLICY_PATH = Path(__file__).parent / "policies" / "family.cedar"
+FAMILY_SCHEMA_PATH = Path(__file__).parent / "policies" / "family.cedarschema"
+
+# CLAUDE.md's spending rules, in cents, both columns: the normal limit and
+# the stricter one after a scam flag. family.cedar picks the column; these
+# are handed to it as context, and are what GET /limits should serve.
+FAMILY_LIMITS = {
+    "day": 50_000,
+    "day_flagged": 10_000,
+    "gift_card_day": 10_000,
+    "new_payee_first": 20_000,
+    "breaker_denials": 3,
+    "breaker_denials_flagged": 1,
+}
+
+# What each forbid in family.cedar does when it fires, in the order a rule
+# is reported when several fire. A deny beats a hold. A rule missing from
+# here is treated as a deny, so adding one to the policy can't fail open
+# (tests/test_family.py checks the two stay in step).
+RULE_OUTCOMES = {
+    "daily_cap": "deny",
+    "gift_card_daily_cap": "deny",
+    "new_payee_cap": "deny",
+    "breaker": "hold",
+    "gift_card_needs_approval": "hold",
+    "new_payee_needs_approval": "hold",
+    "bill_increase": "hold",
+}
+
+# Cedar failed, crashed or timed out. Fail closed: the payment waits.
+GUARD_UNAVAILABLE = "guard_unavailable"
+
+BREAKER_WINDOW = timedelta(minutes=10)
+KNOWN_BILL_CATEGORIES = {"utility", "rent"}
+KNOWN_BILL_LOOKBACK = timedelta(days=45)
+
+
+def _clean_name(field, value):
+    """A required name - person, payee, category, tool, chain link - as the
+    lowercase string the ledger stores. Control characters are refused
+    (see _entity_uid); "/" is refused because chain links become a scope
+    path."""
+    if type(value) is not str or not value.strip():
+        raise ValueError(f"{field} must be a non-empty string, got {value!r}")
+    if "/" in value:
+        raise ValueError(f"{field} must not contain '/', got {value!r}")
+    _entity_uid(field, value)
+    return value.strip().lower()
+
+
+def _response(event_id, decision, rule, context):
+    """CLAUDE.md's /authorize response, rebuilt from what was logged."""
+    tainted = context["tainted"]
+    limits = context["limits"]
+    return {
+        "decision": decision.lower(),
+        "rule": rule,
+        "totals": {"day": context["day_total"],
+                   "gift_card_day": context["gift_card_day_total"]},
+        "limits": {"day": limits["day_flagged" if tainted else "day"],
+                   "gift_card_day": 0 if tainted else limits["gift_card_day"],
+                   "new_payee_first": 0 if tainted else limits["new_payee_first"]},
+        "needs_approval": decision == "HOLD",
+        "event_id": event_id,
+    }
+
+
+def _decide(context, policy_path):
+    """Ask Cedar about one payment. Returns ("ALLOW" | "DENY" | "HOLD", rule).
+    Anything that stops Cedar from answering cleanly is a HOLD."""
+    try:
+        decision, fired = _run_cedar(
+            _entity_uid("Person", context["person"]),
+            'Action::"pay"',
+            _entity_uid("Payee", context["payee"]),
+            {k: v for k, v in context.items() if k not in ("person", "payee")},
+            policy_path=policy_path or FAMILY_POLICY_PATH,
+            schema_path=FAMILY_SCHEMA_PATH,
+            verbose=True,
+        )
+    except (RuntimeError, OSError):
+        return "HOLD", GUARD_UNAVAILABLE
+    if decision == "ALLOW":
+        return "ALLOW", None
+
+    order = list(RULE_OUTCOMES)
+    fired = sorted(fired, key=lambda r: order.index(r) if r in order else -1)
+    denies = [r for r in fired if RULE_OUTCOMES.get(r, "deny") == "deny"]
+    if denies:
+        return "DENY", denies[0]
+    if fired:
+        return "HOLD", fired[0]
+    return "DENY", "unknown"
+
+
+def authorize_payment(conn, *, person, chain, tool, amount_cents, payee, category,
+                      session_id, request_id=None, reason=None, tainted=False,
+                      policy_path=None):
+    """Ask "can Mom's agent make this payment?" under the family's spending
+    rules, log the answer, and return CLAUDE.md's /authorize response:
+    decision ("allow", "deny" or "hold"), the rule that decided it, the
+    totals including this payment, the limits that applied,
+    needs_approval, and the event_id.
+
+    `person` is whose money it is and must be the first link of `chain`,
+    the agents asking on their behalf ("mom" / "bills-agent" / ...). The
+    budget and breaker are the person's; the event is logged under the
+    whole chain. `tainted` is true while the session has seen untrusted
+    text or an AI scam label: it switches every rule to the stricter column.
+    `request_id` makes retries safe, as in authorize_transfer.
+
+    Fail closed: if Cedar fails, crashes or times out, the payment is logged
+    as a hold (rule "guard_unavailable") rather than raising, so it waits
+    for the family. A database error still raises, and the caller must treat
+    that as a hold too. Malformed input raises ValueError and logs nothing.
+    """
+    if type(amount_cents) is not int or not 0 <= amount_cents <= MAX_AMOUNT_CENTS:
+        raise ValueError(
+            "amount_cents must be an int between 0 and "
+            f"{MAX_AMOUNT_CENTS}, got {amount_cents!r}"
+        )
+    if type(tainted) is not bool:
+        raise ValueError(f"tainted must be a bool, got {tainted!r}")
+    if request_id is not None and (type(request_id) is not str or not request_id):
+        raise ValueError(f"request_id must be a non-empty string, got {request_id!r}")
+    person = _clean_name("person", person)
+    if not isinstance(chain, (list, tuple)) or not chain:
+        raise ValueError(f"chain must be a non-empty list, got {chain!r}")
+    chain = [_clean_name("chain link", link) for link in chain]
+    if chain[0] != person:
+        raise ValueError(
+            f"chain must start with the person paying ({person!r}), got {chain!r}"
+        )
+    payee = _clean_name("payee", payee)
+    category = _clean_name("category", category)
+    tool = _clean_name("tool", tool)
+    _entity_uid("session_id", session_id)
+    scope_id = "/".join(chain)
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if request_id is not None:
+            prior = ledger.find_by_request_id(conn, request_id)
+            if prior is not None:
+                event = ledger.get_event(conn, prior[0])
+                if (event["scope_id"], event["payee"], event["amount_cents"]) != (
+                    scope_id, payee, amount_cents
+                ):
+                    raise ValueError(
+                        f"request_id {request_id!r} was already used for a "
+                        "different request"
+                    )
+                conn.rollback()
+                return _response(event["id"], event["decision"], event["rule"],
+                                 event["context"])
+
+        now = datetime.now(timezone.utc)
+        day_since = ledger.utc_timestamp(now - BUDGET_WINDOW)
+        is_gift_card = category == "gift_card"
+        last_bill = None
+        if category in KNOWN_BILL_CATEGORIES:
+            last_bill = aggregates.last_payment(
+                conn, person, payee, ledger.utc_timestamp(now - KNOWN_BILL_LOOKBACK)
+            )
+        context = {
+            "person": person,
+            "payee": payee,
+            "amount": amount_cents,
+            "is_gift_card": is_gift_card,
+            "tainted": tainted,
+            "day_total": aggregates.cumulative_cost_for_scope(
+                conn, person, since=day_since) + amount_cents,
+            "gift_card_day_total": aggregates.cumulative_cost_for_scope(
+                conn, person, since=day_since, category="gift_card")
+                + (amount_cents if is_gift_card else 0),
+            "new_payee": not aggregates.has_paid(conn, person, payee),
+            "known_bill": last_bill is not None,
+            "last_bill": last_bill or 0,
+            "recent_denials": aggregates.denials_since(
+                conn, person, ledger.utc_timestamp(now - BREAKER_WINDOW)),
+            "limits": FAMILY_LIMITS,
+        }
+        decision, rule = _decide(context, policy_path)
+
+        event_id = ledger.insert_event(
+            conn, ledger.utc_timestamp(now), session_id, "pay", payee,
+            amount_cents, decision, scope_id=scope_id, request_id=request_id,
+            payee=payee, category=category, tool=tool, chain=chain,
+            reason=reason, rule=rule, context=context,
+        )
+        conn.commit()
+        return _response(event_id, decision, rule, context)
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def resolve(conn, event_id, action, authorized_by):
+    """The family settles a held payment: `action` is "approve" or "deny".
+    Appends a row that resolves the held one and returns its event_id; the
+    held row never changes. An approval counts toward the totals from now,
+    and goes through even past a limit - the family is the override. Only a
+    hold can be resolved, and only once.
+
+    This is POST /override's job. The agent must never be able to call it.
+    """
+    if action not in ("approve", "deny"):
+        raise ValueError(f"action must be 'approve' or 'deny', got {action!r}")
+    if type(authorized_by) is not str or not authorized_by.strip():
+        raise ValueError(f"authorized_by must be a non-empty string, got {authorized_by!r}")
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        held = ledger.get_event(conn, event_id)
+        if held is None or held["decision"] != "HOLD" or held["resolves"] is not None:
+            raise ValueError(f"event {event_id!r} is not a payment waiting for approval")
+        if conn.execute("SELECT 1 FROM events WHERE resolves = ?", (event_id,)).fetchone():
+            raise ValueError(f"event {event_id!r} was already resolved")
+
+        approved = action == "approve"
+        new_id = ledger.insert_event(
+            conn, ledger.utc_timestamp(), held["session_id"], held["action"],
+            held["resource"], held["amount_cents"], "ALLOW" if approved else "DENY",
+            scope_id=held["scope_id"], resolves=event_id, payee=held["payee"],
+            category=held["category"], tool=held["tool"], chain=held["chain"],
+            reason=f"{action}d by {authorized_by.strip()}",
+            rule="approved_by_family" if approved else "denied_by_family",
+        )
+        conn.commit()
+        return new_id
     except Exception:
         conn.rollback()
         raise

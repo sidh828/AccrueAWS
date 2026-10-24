@@ -1,0 +1,40 @@
+// The request family.cedar is written against. Every total and limit is
+// integer cents, worked out by authorize.authorize_payment from the ledger
+// before Cedar is asked; Cedar only compares. `cedar validate --schema
+// family.cedarschema --policies family.cedar` checks the policy against
+// this, and tests/test_family.py runs that check.
+
+entity Person;
+entity Payee;
+
+action pay appliesTo {
+    principal: [Person],
+    resource: [Payee],
+    context: {
+        // This request.
+        amount: Long,
+        is_gift_card: Bool,
+        // The session saw untrusted text or an AI scam label: the stricter
+        // column of the spending rules applies.
+        tainted: Bool,
+        // Allowed in the last 24 hours, including this request.
+        day_total: Long,
+        gift_card_day_total: Long,
+        // Nothing has ever been allowed to this payee for this person.
+        new_payee: Bool,
+        // A utility or rent payee paid within the last 45 days, and the
+        // last amount paid to it.
+        known_bill: Bool,
+        last_bill: Long,
+        // Denials in the last 10 minutes since the last breaker override.
+        recent_denials: Long,
+        limits: {
+            day: Long,
+            day_flagged: Long,
+            gift_card_day: Long,
+            new_payee_first: Long,
+            breaker_denials: Long,
+            breaker_denials_flagged: Long,
+        },
+    }
+};

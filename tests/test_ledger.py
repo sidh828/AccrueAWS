@@ -23,7 +23,7 @@ def test_update_is_rejected(conn):
     conn.commit()
 
     with pytest.raises(sqlite3.Error, match="append-only"):
-        conn.execute("UPDATE events SET cost_usd = 0 WHERE id = 1")
+        conn.execute("UPDATE events SET amount_cents = 0 WHERE id = 1")
 
 
 def test_delete_is_rejected(conn):
@@ -55,7 +55,7 @@ def test_concurrent_authorize_calls_serialize(tmp_path):
 
     def attempt(name):
         conn = ledger.connect(str(db_path))
-        results[name] = authorize.authorize_transfer(conn, "sess-001", "acct-1234", 6000)
+        results[name] = authorize.authorize_transfer(conn, "sess-001", "acct-1234", 600_000)  # $6,000
         conn.close()
 
     t1 = threading.Thread(target=attempt, args=("a",))

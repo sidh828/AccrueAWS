@@ -12,7 +12,7 @@ from .ledger import home_scope, normalize_scope
 
 def cumulative_cost(conn, session_id):
     row = conn.execute(
-        "SELECT COALESCE(SUM(cost_usd), 0) FROM events "
+        "SELECT COALESCE(SUM(amount_cents), 0) FROM events "
         "WHERE session_id = ? AND decision = 'ALLOW'",
         (session_id,),
     ).fetchone()
@@ -64,7 +64,7 @@ def _scope_filter(scope_id):
             [scope_id, scope_id + "/", scope_id + "0"])
 
 
-def cumulative_cost_for_scope(conn, scope_id, since=None):
+def cumulative_cost_for_scope(conn, scope_id, since=None, category=None):
     """Like cumulative_cost, but rolled up across every session under one
     durable scope_id, optionally windowed to only events at or after
     `since`.
@@ -80,14 +80,20 @@ def cumulative_cost_for_scope(conn, scope_id, since=None):
     above: a DENYed attempt never happened.
 
     `since` must be in ledger.utc_timestamp's format: the comparison is on
-    strings.
+    strings. `category`, when given, counts only that category.
+
+    An approved hold counts from its approval row (see ledger.SCHEMA); the
+    HOLD row itself never does.
     """
     where, params = _scope_filter(normalize_scope(scope_id))
-    query = ("SELECT COALESCE(SUM(cost_usd), 0) FROM events "
+    query = ("SELECT COALESCE(SUM(amount_cents), 0) FROM events "
              f"WHERE {where} AND decision = 'ALLOW'")
     if since is not None:
         query += " AND timestamp >= ?"
         params.append(since)
+    if category is not None:
+        query += " AND category = ?"
+        params.append(category)
 
     row = conn.execute(query, params).fetchone()
     return row[0]
@@ -103,7 +109,51 @@ def last_event_for_scope(conn, scope_id):
     where, params = _scope_filter(normalize_scope(scope_id))
     return conn.execute(
         "SELECT id, timestamp, session_id, scope_id, action, resource, "
-        f"cost_usd, decision FROM events WHERE {where} "
+        f"amount_cents, decision FROM events WHERE {where} "
         "ORDER BY id DESC LIMIT 1",
         params,
     ).fetchone()
+
+
+# --- Family payments ----------------------------------------------------
+#
+# What authorize.authorize_payment needs besides totals. All of these are
+# per home (the person), so they share the (home, ...) indexes.
+
+def has_paid(conn, home, payee):
+    """Whether anything was ever allowed from this person to this payee.
+    False means the next payment is a first payment to someone new."""
+    return conn.execute(
+        "SELECT 1 FROM events WHERE home = ? AND payee = ? AND decision = 'ALLOW' "
+        "LIMIT 1",
+        (normalize_scope(home), payee),
+    ).fetchone() is not None
+
+
+def last_payment(conn, home, payee, since):
+    """The most recent amount allowed from this person to this payee at or
+    after `since`, or None."""
+    row = conn.execute(
+        "SELECT amount_cents FROM events "
+        "WHERE home = ? AND payee = ? AND decision = 'ALLOW' AND timestamp >= ? "
+        "ORDER BY id DESC LIMIT 1",
+        (normalize_scope(home), payee, since),
+    ).fetchone()
+    return None if row is None else row[0]
+
+
+def denials_since(conn, home, since):
+    """How many payments the guard itself denied for this person at or after
+    `since`, not counting any from before the person's last override (see
+    ledger.insert_override). A family member denying a held payment isn't
+    counted: only the guard's own denials trip the breaker."""
+    home = normalize_scope(home)
+    row = conn.execute(
+        "SELECT COUNT(*) FROM events "
+        "WHERE home = ? AND decision = 'DENY' AND resolves IS NULL "
+        "AND timestamp >= ? AND id > ("
+        "    SELECT COALESCE(MAX(after_event_id), 0) FROM overrides WHERE scope_id = ?"
+        ")",
+        (home, since, home),
+    ).fetchone()
+    return row[0]

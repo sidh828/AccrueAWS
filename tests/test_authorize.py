@@ -1,8 +1,12 @@
 """Cedar is stateless (PRIMER.md 1.3-1.5); this file proves authorize.py is
 the thing that actually keeps score, and that it fails closed rather than
 open when Cedar can't be trusted.
+
+Every amount is integer cents: 999_900 is $9,999, and budget.cedar's cap of
+1000000 is $10,000.
 """
 
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -23,11 +27,11 @@ def test_50x_9999_eventually_denies(conn):
     authorize.py must catch it once cumulative spend crosses $10,000.
     """
     decisions = [
-        authorize.authorize_transfer(conn, "sess-001", "acct-1234", 9999)
+        authorize.authorize_transfer(conn, "sess-001", "acct-1234", 999_900)
         for _ in range(5)
     ]
 
-    # 9999, 19998, 29997, ... - crosses 10000 on the second transfer.
+    # $9,999, $19,998, ... - crosses $10,000 on the second transfer.
     assert decisions == ["ALLOW", "DENY", "DENY", "DENY", "DENY"]
 
 
@@ -41,13 +45,14 @@ def test_denied_attempts_do_not_inflate_the_total(conn):
     halves: the breaker's stronger default, and that an override really
     does hand control back to the headroom-based check.
     """
-    authorize.authorize_transfer(conn, "sess-001", "acct-1234", 9999)  # ALLOW
+    authorize.authorize_transfer(conn, "sess-001", "acct-1234", 999_900)  # ALLOW
     for _ in range(10):
-        authorize.authorize_transfer(conn, "sess-001", "acct-1234", 9999)  # DENY, trips the breaker
+        authorize.authorize_transfer(conn, "sess-001", "acct-1234", 999_900)  # DENY, trips the breaker
 
-    # Cumulative cost alone still has 1 (10000 - 9999) of headroom left, but
-    # the breaker is tripped - denied outright without even asking Cedar.
-    decision = authorize.authorize_transfer(conn, "sess-001", "acct-1234", 1)
+    # Cumulative cost alone still has $1 ($10,000 - $9,999) of headroom
+    # left, but the breaker is tripped - denied outright without even
+    # asking Cedar.
+    decision = authorize.authorize_transfer(conn, "sess-001", "acct-1234", 100)
     assert decision == "DENY"
 
     # An explicit override resets the breaker - the headroom-based check
@@ -57,7 +62,7 @@ def test_denied_attempts_do_not_inflate_the_total(conn):
         "test: confirming override un-trips the breaker",
     )
     conn.commit()
-    decision = authorize.authorize_transfer(conn, "sess-001", "acct-1234", 1)
+    decision = authorize.authorize_transfer(conn, "sess-001", "acct-1234", 100)
     assert decision == "ALLOW"
 
 
@@ -68,28 +73,39 @@ def test_budget_is_shared_across_sessions_under_the_same_scope(conn):
     they cross $10,000 and the second one must DENY.
     """
     first = authorize.authorize_transfer(
-        conn, "sess-A", "acct-1234", 6000, scope_id="agent-a"
+        conn, "sess-A", "acct-1234", 600_000, scope_id="agent-a"
     )
     second = authorize.authorize_transfer(
-        conn, "sess-B", "acct-1234", 6000, scope_id="agent-a"
+        conn, "sess-B", "acct-1234", 600_000, scope_id="agent-a"
     )
     assert (first, second) == ("ALLOW", "DENY")
 
 
-@pytest.mark.parametrize("amount", [-50000, -0.01, float("nan"), float("inf")])
+@pytest.mark.parametrize("amount", [
+    -5_000_000,                     # the negative-amount bypass
+    -1,
+    999_900.0,                      # money is integer cents: no floats
+    0.5,
+    float("nan"),
+    float("inf"),
+    True,                           # bool is an int subclass, but not a cent
+    "999900",
+    authorize.MAX_AMOUNT_CENTS + 1,
+])
 def test_invalid_amounts_are_rejected_and_not_logged(conn, amount):
     """Regression test for the negative-amount bypass: a -$50,000 transfer
     used to be ALLOWed and logged, lowering the running total so a $59,000
-    transfer right after it was ALLOWed too. Malformed amounts must raise
-    before anything is written - a logged row would count toward totals.
+    transfer right after it was ALLOWed too. Anything that isn't a
+    non-negative int number of cents must raise before anything is
+    written - a logged row would count toward totals.
     """
-    with pytest.raises(ValueError, match="amount_usd"):
+    with pytest.raises(ValueError, match="amount_cents"):
         authorize.authorize_transfer(conn, "sess-001", "acct-1234", amount)
     assert ledger.list_events(conn) == []
 
     # The budget is untouched: the follow-up transfer that used to slip
     # through on borrowed headroom is still over $10,000.
-    assert authorize.authorize_transfer(conn, "sess-001", "acct-1234", 59000) == "DENY"
+    assert authorize.authorize_transfer(conn, "sess-001", "acct-1234", 5_900_000) == "DENY"
 
 
 def test_new_task_under_the_same_home_does_not_get_a_fresh_budget(conn):
@@ -100,7 +116,7 @@ def test_new_task_under_the_same_home_does_not_get_a_fresh_budget(conn):
     """
     decisions = [
         authorize.authorize_transfer(
-            conn, "sess-001", "acct-1234", 9999, scope_id=f"agent-a/task-{i}"
+            conn, "sess-001", "acct-1234", 999_900, scope_id=f"agent-a/task-{i}"
         )
         for i in range(3)
     ]
@@ -113,12 +129,12 @@ def test_deny_in_one_task_trips_its_siblings(conn):
     though agent-a still has headroom. An override logged against the home
     resets it.
     """
-    authorize.authorize_transfer(conn, "s1", "acct-1234", 6000, scope_id="agent-a/task-x")
+    authorize.authorize_transfer(conn, "s1", "acct-1234", 600_000, scope_id="agent-a/task-x")
     assert authorize.authorize_transfer(
-        conn, "s1", "acct-1234", 6000, scope_id="agent-a/task-x"
+        conn, "s1", "acct-1234", 600_000, scope_id="agent-a/task-x"
     ) == "DENY"
     assert authorize.authorize_transfer(
-        conn, "s2", "acct-1234", 1, scope_id="agent-a/task-y"
+        conn, "s2", "acct-1234", 100, scope_id="agent-a/task-y"
     ) == "DENY"
 
     ledger.insert_override(
@@ -127,17 +143,17 @@ def test_deny_in_one_task_trips_its_siblings(conn):
     )
     conn.commit()
     assert authorize.authorize_transfer(
-        conn, "s2", "acct-1234", 1, scope_id="agent-a/task-y"
+        conn, "s2", "acct-1234", 100, scope_id="agent-a/task-y"
     ) == "ALLOW"
 
 
 def test_other_homes_are_unaffected(conn):
     """Rolling up to the home must not leak across homes: agent-a being
     over budget and tripped says nothing about agent-b."""
-    authorize.authorize_transfer(conn, "s1", "acct-1234", 9999, scope_id="agent-a/task-x")
-    authorize.authorize_transfer(conn, "s1", "acct-1234", 9999, scope_id="agent-a/task-x")
+    authorize.authorize_transfer(conn, "s1", "acct-1234", 999_900, scope_id="agent-a/task-x")
+    authorize.authorize_transfer(conn, "s1", "acct-1234", 999_900, scope_id="agent-a/task-x")
     assert authorize.authorize_transfer(
-        conn, "s2", "acct-1234", 9999, scope_id="agent-b/task-x"
+        conn, "s2", "acct-1234", 999_900, scope_id="agent-b/task-x"
     ) == "ALLOW"
 
 
@@ -147,18 +163,18 @@ def test_scope_names_are_case_insensitive(conn):
     person got $10,000 per spelling. Scopes are lowercased on the way in
     and out now: one budget, one breaker, and an override logged under any
     spelling resets it."""
-    assert authorize.authorize_transfer(conn, "s1", "acct-1234", 6000, scope_id="Mom") == "ALLOW"
+    assert authorize.authorize_transfer(conn, "s1", "acct-1234", 600_000, scope_id="Mom") == "ALLOW"
     assert authorize.authorize_transfer(
-        conn, "s2", "acct-1234", 6000, scope_id="MOM/bills"
+        conn, "s2", "acct-1234", 600_000, scope_id="MOM/bills"
     ) == "DENY"
-    assert authorize.authorize_transfer(conn, "s3", "acct-1234", 1, scope_id="mom") == "DENY"
+    assert authorize.authorize_transfer(conn, "s3", "acct-1234", 100, scope_id="mom") == "DENY"
 
     ledger.insert_override(
         conn, datetime.now(timezone.utc).isoformat(), "MoM", "sid",
         "test: an override under another spelling still resets the breaker",
     )
     conn.commit()
-    assert authorize.authorize_transfer(conn, "s3", "acct-1234", 1, scope_id="mom") == "ALLOW"
+    assert authorize.authorize_transfer(conn, "s3", "acct-1234", 100, scope_id="mom") == "ALLOW"
 
 
 def test_budget_counts_only_the_last_24_hours(conn):
@@ -166,17 +182,85 @@ def test_budget_counts_only_the_last_24_hours(conn):
     budget was lifetime - $9,999 spent a year ago still blocked $2 today.
     Only the last authorize.BUDGET_WINDOW counts now."""
     now = datetime.now(timezone.utc)
-    for hours_ago, amount in [(25, 9000), (23, 500)]:
+    for hours_ago, amount in [(25, 900_000), (23, 50_000)]:
         ledger.insert_event(
             conn, ledger.utc_timestamp(now - timedelta(hours=hours_ago)), "s0",
             "transfer", "acct-1234", amount, "ALLOW", scope_id="mom",
         )
     conn.commit()
 
-    # 25 hours ago has aged out; 23 hours ago still counts: 500 + 9500 is
-    # exactly the $10,000 cap, and $1 more is over it.
-    assert authorize.authorize_transfer(conn, "s1", "acct-1234", 9500, scope_id="mom") == "ALLOW"
+    # 25 hours ago has aged out; 23 hours ago still counts: $500 + $9,500
+    # is exactly the $10,000 cap, and one cent more is over it.
+    assert authorize.authorize_transfer(conn, "s1", "acct-1234", 950_000, scope_id="mom") == "ALLOW"
     assert authorize.authorize_transfer(conn, "s1", "acct-1234", 1, scope_id="mom") == "DENY"
+
+
+def test_retrying_a_request_id_is_not_counted_twice(conn):
+    """An agent that times out and asks again with the same request_id gets
+    the original decision back, and nothing new is logged or counted. If
+    the retry had counted, the third request's $6,000 would have been
+    measured against $12,000 already spent instead of $6,000."""
+    first = authorize.authorize_transfer(
+        conn, "s1", "acct-1234", 600_000, scope_id="mom", request_id="req-1"
+    )
+    retry = authorize.authorize_transfer(
+        conn, "s1", "acct-1234", 600_000, scope_id="mom", request_id="req-1"
+    )
+    assert (first, retry) == ("ALLOW", "ALLOW")
+    assert len(ledger.list_events(conn)) == 1
+
+    assert authorize.authorize_transfer(
+        conn, "s1", "acct-1234", 400_000, scope_id="mom", request_id="req-2"
+    ) == "ALLOW"
+
+
+def test_reusing_a_request_id_for_a_different_request_raises(conn):
+    authorize.authorize_transfer(
+        conn, "s1", "acct-1234", 600_000, scope_id="mom", request_id="req-1"
+    )
+    with pytest.raises(ValueError, match="different request"):
+        authorize.authorize_transfer(
+            conn, "s1", "acct-1234", 700_000, scope_id="mom", request_id="req-1"
+        )
+    assert len(ledger.list_events(conn)) == 1
+
+
+def test_racing_copies_of_one_request_are_logged_once(tmp_path):
+    """Ten copies of the same request fired at once (an agent retrying in
+    parallel) all get the same decision, and only one row is written: the
+    request_id lookup happens inside the write lock."""
+    db_path = str(tmp_path / "ledger.db")
+    ledger.connect(db_path).close()
+    results = []
+
+    def attempt():
+        conn = ledger.connect(db_path)
+        results.append(authorize.authorize_transfer(
+            conn, "s1", "acct-1234", 600_000, scope_id="mom", request_id="req-1"
+        ))
+        conn.close()
+
+    threads = [threading.Thread(target=attempt) for _ in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert results == ["ALLOW"] * 10
+    assert len(ledger.list_events(ledger.connect(db_path))) == 1
+
+
+def test_policy_path_is_a_parameter(conn, tmp_path):
+    """A draft policy can be asked beside the live one (policy replay, the
+    other policy packs) without swapping a module global."""
+    strict = tmp_path / "strict.cedar"
+    strict.write_text(authorize.POLICY_PATH.read_text().replace(
+        "context.cumulative_cost > 1000000", "context.cumulative_cost > 10000"
+    ))
+    assert authorize.authorize_transfer(
+        conn, "s1", "acct-1234", 20_000, scope_id="a", policy_path=strict
+    ) == "DENY"
+    assert authorize.authorize_transfer(conn, "s1", "acct-1234", 20_000, scope_id="b") == "ALLOW"
 
 
 def test_session_id_with_a_slash_is_not_split_into_a_home(conn):
@@ -185,60 +269,43 @@ def test_session_id_with_a_slash_is_not_split_into_a_home(conn):
     "user/456" share one home budget, so it's rejected before anything is
     logged."""
     with pytest.raises(ValueError, match="pass scope_id explicitly"):
-        authorize.authorize_transfer(conn, "user/123", "acct-1234", 9999)
+        authorize.authorize_transfer(conn, "user/123", "acct-1234", 999_900)
     assert ledger.list_events(conn) == []
 
 
 def test_session_id_with_a_slash_is_fine_with_an_explicit_scope(conn):
     assert authorize.authorize_transfer(
-        conn, "user/123", "acct-1234", 9999, scope_id="user-123"
+        conn, "user/123", "acct-1234", 999_900, scope_id="user-123"
     ) == "ALLOW"
     assert authorize.authorize_transfer(
-        conn, "user/456", "acct-1234", 9999, scope_id="user-456"
+        conn, "user/456", "acct-1234", 999_900, scope_id="user-456"
     ) == "ALLOW"
 
 
 def test_scope_without_a_home_is_rejected(conn):
     with pytest.raises(ValueError, match="home segment"):
-        authorize.authorize_transfer(conn, "s1", "acct-1234", 1, scope_id="/task-x")
+        authorize.authorize_transfer(conn, "s1", "acct-1234", 100, scope_id="/task-x")
     assert ledger.list_events(conn) == []
 
 
 def test_exactly_10000_is_allowed(conn):
     """Documents current behavior: budget.cedar's forbid triggers on
-    `context.cumulative_cost > 10000`, so a total of exactly $10,000 is
+    `context.cumulative_cost > 1000000`, so a total of exactly $10,000 is
     ALLOWed, not blocked. If the intent was an inclusive $10,000 cap, the
     policy needs `>=` instead - flagging here so a policy change shows up
     as a failing test, not a silent behavior change.
     """
-    decision = authorize.authorize_transfer(conn, "sess-001", "acct-1234", 10000)
+    decision = authorize.authorize_transfer(conn, "sess-001", "acct-1234", 1_000_000)
     assert decision == "ALLOW"
 
 
-@pytest.mark.parametrize("amount, expected", [
-    (10000.4, "DENY"),   # round() used to make this 10000 and ALLOW it
-    (10000.5, "DENY"),   # ...and this one too (banker's rounding to even)
-    (10000.01, "DENY"),
-    (9999.99, "ALLOW"),
-])
-def test_fractional_totals_over_the_cap_are_denied(conn, amount, expected):
-    """Regression test for the rounding edge: Cedar only takes whole
-    dollars, and rounding to nearest let totals up to $10,000.50 through a
-    `> 10000` check. Anything over the cap by a cent or more must DENY.
-    """
-    assert authorize.authorize_transfer(conn, "sess-001", "acct-1234", amount) == expected
-
-
-def test_float_drift_does_not_deny_a_total_exactly_at_the_cap(conn):
-    """The other side of rounding up: these seven amounts total exactly
-    $10,000.00, but in floating point the running total comes out as
-    10000.000000000002. Rounding that straight up would give 10001 and
-    DENY the last transfer even though the policy allows exactly $10,000.
-    """
-    for amount in [1832.41, 710.49, 2559.53, 358.12, 2680.03, 1671.63]:
-        assert authorize.authorize_transfer(conn, "sess-001", "acct-1234", amount) == "ALLOW"
-
-    assert authorize.authorize_transfer(conn, "sess-001", "acct-1234", 187.79) == "ALLOW"
+def test_one_cent_over_the_cap_is_denied(conn):
+    """With dollars as floats, Cedar had to be handed a rounded number, and
+    rounding let totals up to $10,000.50 through. In integer cents nothing
+    is rounded: one cent over is over."""
+    assert authorize.authorize_transfer(conn, "s1", "acct-1234", 1_000_001, scope_id="a") == "DENY"
+    assert authorize.authorize_transfer(conn, "s1", "acct-1234", 999_999, scope_id="b") == "ALLOW"
+    assert authorize.authorize_transfer(conn, "s1", "acct-1234", 2, scope_id="b") == "DENY"
 
 
 def test_cedar_policy_error_fails_closed():
@@ -252,7 +319,7 @@ def test_cedar_policy_error_fails_closed():
             'Session::"sess-001"',
             'Action::"transfer"',
             'Account::"acct-1234"',
-            {"cumulative_kost": 50000},  # typo: not a real context attribute
+            {"cumulative_kost": 5_000_000},  # typo: not a real context attribute
         )
 
 
@@ -284,11 +351,11 @@ def test_a_hung_cedar_times_out_and_releases_the_lock(tmp_path, monkeypatch):
 def test_clean_allow_and_deny_still_work():
     assert _ask_cedar(
         'Session::"sess-001"', 'Action::"transfer"', 'Account::"acct-1234"',
-        {"cumulative_cost": 500},
+        {"cumulative_cost": 50_000},
     ) == "ALLOW"
     assert _ask_cedar(
         'Session::"sess-001"', 'Action::"transfer"', 'Account::"acct-1234"',
-        {"cumulative_cost": 20000},
+        {"cumulative_cost": 2_000_000},
     ) == "DENY"
 
 
