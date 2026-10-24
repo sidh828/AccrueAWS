@@ -15,6 +15,7 @@ from guard import authorize, ledger
 from walls.inbound import InboundWall, SessionStore
 from walls.outbound import OutboundWall
 from walls.secrets import SecretStore
+from walls.storage import WallStateStore
 
 logger = logging.getLogger(__name__)
 
@@ -69,11 +70,22 @@ def _configured_contacts() -> set[str]:
 def create_app(
     db_path: str | Path | None = None,
     contacts: set[str] | None = None,
+    wall_key: str | bytes | None = None,
 ) -> FastAPI:
+    configured_key = wall_key if wall_key is not None else os.environ.get("ACCRUE_WALL_KEY")
+    if configured_key is None:
+        raise ValueError("ACCRUE_WALL_KEY must be set to persist verification-code digests")
+    if not isinstance(configured_key, (str, bytes)):
+        raise ValueError("ACCRUE_WALL_KEY must be text or bytes")
+    code_key = configured_key.encode("utf-8") if isinstance(configured_key, str) else configured_key
+    if len(code_key) < 32:
+        raise ValueError("ACCRUE_WALL_KEY must contain at least 32 bytes")
+
     app = FastAPI(title="Accrue Guard")
     app.state.db_path = _database_path(db_path)
-    app.state.sessions = SessionStore()
-    app.state.secrets = SecretStore()
+    wall_storage = WallStateStore(app.state.db_path, code_key)
+    app.state.sessions = SessionStore(storage=wall_storage)
+    app.state.secrets = SecretStore(storage=wall_storage)
     app.state.inbound_wall = InboundWall(app.state.sessions, app.state.secrets)
     app.state.outbound_wall = OutboundWall(
         app.state.secrets,
@@ -137,6 +149,3 @@ def create_app(
         )
 
     return app
-
-
-app = create_app()

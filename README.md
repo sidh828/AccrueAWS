@@ -40,10 +40,13 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m guard.main
 
 # the live guard API (agent tools call /authorize, /inbound and /outbound):
-# set ACCRUE_ALLOWED_CONTACTS to a comma-separated trusted-recipient list first
-# .venv/bin/uvicorn guard.api:app --host 127.0.0.1 --port 8000
-# Wall taint and received-code state currently live in this one server process;
-# run one worker and keep it running until that state is persisted.
+# generate ACCRUE_WALL_KEY once (at least 32 bytes), store it securely outside
+# the database, and keep it stable across restarts. Set ACCRUE_ALLOWED_CONTACTS
+# to a comma-separated trusted-recipient list before starting the server.
+# Generate a key with: python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+# .venv/bin/uvicorn --factory guard.api:create_app --host 127.0.0.1 --port 8000
+# Taint and keyed verification-code digests persist in the guard SQLite database.
+# Password-vault entries are still in memory and must be loaded at startup.
 
 # the family dashboard against a stand-in API:
 # It prints two links: the one ending in #token=... can approve payments

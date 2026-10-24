@@ -8,7 +8,11 @@ import guard.api as guard_api
 
 @pytest.fixture
 def client(tmp_path):
-    app = guard_api.create_app(db_path=tmp_path / "ledger.db", contacts={"daughter@example.com"})
+    app = guard_api.create_app(
+        db_path=tmp_path / "ledger.db",
+        contacts={"daughter@example.com"},
+        wall_key=b"test-wall-key-" * 3,
+    )
     with TestClient(app) as test_client:
         yield test_client
 
@@ -174,3 +178,53 @@ def test_authorize_endpoint_holds_if_ledger_fails(client, monkeypatch, caplog):
     assert response.json()["decision"] == "hold"
     assert response.json()["rule"] == "database_unavailable"
     assert "Payment authorization failed" in caplog.text
+
+
+def test_taint_and_received_codes_survive_api_restart(tmp_path):
+    db_path = tmp_path / "ledger.db"
+    key = b"stable-test-wall-key-" * 2
+    first_app = guard_api.create_app(db_path=db_path, contacts={"daughter@example.com"}, wall_key=key)
+    with TestClient(first_app) as first_client:
+        first_client.post(
+            "/inbound",
+            json={
+                "session_id": "restart-session",
+                "source": "sms",
+                "content": "Your verification code is 427193.",
+            },
+        )
+
+    with sqlite3.connect(db_path) as conn:
+        stored_digest = conn.execute(
+            "SELECT code_digest FROM wall_received_codes"
+        ).fetchone()[0]
+    assert "427193" not in stored_digest
+
+    restarted_app = guard_api.create_app(
+        db_path=db_path,
+        contacts={"daughter@example.com"},
+        wall_key=key,
+    )
+    with TestClient(restarted_app) as restarted_client:
+        assert restarted_app.state.sessions.is_tainted("restart-session")
+        response = restarted_client.post(
+            "/outbound",
+            json={
+                "session_id": "restart-session",
+                "recipient": "daughter@example.com",
+                "channel": "sms",
+                "content": "The code is 4 2 7 1 9 3",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["decision"] == "block"
+    restarted_app.state.sessions.clear("restart-session", actor="daughter")
+
+    final_app = guard_api.create_app(db_path=db_path, contacts={"daughter@example.com"}, wall_key=key)
+    assert not final_app.state.sessions.is_tainted("restart-session")
+
+
+def test_api_requires_stable_wall_key(tmp_path):
+    with pytest.raises(ValueError, match="ACCRUE_WALL_KEY"):
+        guard_api.create_app(db_path=tmp_path / "ledger.db", wall_key="too-short")
