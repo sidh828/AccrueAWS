@@ -123,8 +123,21 @@ def test_first_payment_to_someone_new_is_capped_at_200(conn):
     assert outcome(pay(conn, 20_000, "plumber.example", "home_repair")) == ("allow", None)
     assert outcome(pay(conn, 20_001, "zelle:new-contact", "transfer")) == (
         "deny", "new_payee_cap")
-    # Paid once, the plumber isn't new any more.
-    assert outcome(pay(conn, 20_001, "plumber.example", "home_repair")) == ("allow", None)
+    # Paid once, the plumber isn't new - but in his first 30 days he's capped
+    # at $200 in total: a second invoice waits for the family.
+    response = pay(conn, 5_000, "plumber.example", "home_repair")
+    assert outcome(response) == ("hold", "new_payee_month_cap")
+
+
+def test_a_one_dollar_payment_does_not_unlock_a_big_one(conn):
+    """Found in review: "send $1 to verify the account", then $450 - the $1
+    made the payee not-new, so the $450 skipped the first-payment cap and
+    went through. It waits for the family now. A $0 payment is refused."""
+    assert outcome(pay(conn, 100, "atty-r-mendez.example", "transfer")) == ("allow", None)
+    assert outcome(pay(conn, 45_000, "atty-r-mendez.example", "transfer")) == (
+        "hold", "new_payee_month_cap")
+    with pytest.raises(ValueError, match="amount_cents"):
+        pay(conn, 0, "mule.example", "transfer")
 
 
 def test_any_first_payment_waits_after_a_scam_flag(conn):
@@ -133,12 +146,12 @@ def test_any_first_payment_waits_after_a_scam_flag(conn):
 
 
 def test_known_bills_can_rise_20_percent_and_are_exempt_from_the_daily_cap(conn):
-    paid_before(conn, "ohio-power.example", 10_000, "utility", days_ago=30)
-    assert outcome(pay(conn, 12_000, "ohio-power.example", "utility")) == ("allow", None)
-    # Last time was $120 now, so $144 is the most it can be without asking.
+    paid_before(conn, "ohio-power.example", 12_000, "utility", days_ago=30)
+    # Last time was $120, so $144 is the most it can be without asking.
     assert outcome(pay(conn, 14_401, "ohio-power.example", "utility")) == (
         "hold", "bill_increase")
-    assert outcome(pay(conn, 14_400, "ohio-power.example", "utility")) == ("allow", None)
+    response = pay(conn, 14_400, "ohio-power.example", "utility")
+    assert outcome(response) == ("allow", None) and response["totals"]["day"] == 0
 
     paid_before(conn, "landlord.example", 120_000, "rent", days_ago=31)
     response = pay(conn, 120_000, "landlord.example", "rent")
@@ -161,6 +174,21 @@ def test_the_tool_decides_which_categories_it_can_pay(conn):
                 conn, person="mom", chain=BILLS, tool=tool, amount_cents=100,
                 payee="x.example", category=category, session_id="s")
     assert ledger.contract_rows(conn) == []
+
+
+def test_the_same_bill_paid_again_in_the_same_cycle_counts_toward_the_day(conn):
+    """Found in review: a known bill had no once-a-month limit, so "your
+    payment didn't go through, pay again" paid the $120 power bill ten
+    times in a day - $1,200, all exempt from the $500 cap. Only the first
+    payment in a cycle is the month's bill now."""
+    paid_before(conn, "ohio-power.example", 12_000, "utility", days_ago=30)
+    outcomes = [outcome(pay(conn, 12_000, "ohio-power.example", "utility"))
+                for _ in range(10)]
+    assert outcomes[:5] == [("allow", None)] * 5  # the bill, then $480 counted
+    assert outcomes[5:] == [("hold", "daily_cap_needs_approval")] * 5
+    allowed = sum(r["amount_cents"] for r in ledger.contract_rows(conn)
+                  if r["decision"] == "allow" and r["event_id"] > 1)
+    assert allowed == 60_000  # the month's bill plus $480 - not $1,200
 
 
 def test_a_new_payee_calling_itself_a_utility_is_not_a_known_bill(conn):
@@ -226,15 +254,15 @@ def test_recent_payees_are_capped_at_500_a_month_together(conn):
     family. Spreading it over new "accounts" doesn't reset the count."""
     now = datetime.now(timezone.utc)
     for days_ago, payee, amount in [(12, "james-oduya-medic.example", 15_000),
-                                    (9, "james-oduya-medic.example", 25_000),
-                                    (6, "medic-family-fund.example", 9_000)]:
+                                    (9, "medic-family-fund.example", 19_000),
+                                    (6, "medic-travel-desk.example", 15_000)]:
         ledger.insert_event(conn, ledger.utc_timestamp(now - timedelta(days=days_ago)),
                             "s0", "pay", payee, amount, "ALLOW", scope_id="mom/bills-agent",
                             payee=payee, category="transfer")
     conn.commit()
-    # $490 so far; $10 more is exactly $500.
+    # $490 so far, none over $200 on its own; $10 more is exactly $500.
     assert outcome(pay(conn, 1_000, "james-oduya-medic.example", "transfer")) == ("allow", None)
-    response = pay(conn, 2_500, "medic-family-fund.example", "transfer")
+    response = pay(conn, 2_500, "medic-visa-office.example", "transfer")
     assert outcome(response) == ("hold", "recent_payee_cap")
     assert response["totals"]["recent_payees"] == 52_500
     # Someone she has paid for months isn't affected.

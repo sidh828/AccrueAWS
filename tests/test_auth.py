@@ -50,6 +50,7 @@ def call(base, method, path, role=None, body=None):
 def test_authentication_is_required_for_api_data_but_not_dashboard_assets(server):
     assert call(server, "GET", "/events")[0] == 401
     assert call(server, "GET", "/whoami")[0] == 401
+    assert call(server, "GET", "/demo/status")[0] == 401
     assert call(server, "POST", "/inbound", body={
         "session_id": "auth-test", "source": "sms", "content": "hello",
     })[0] == 401
@@ -98,6 +99,15 @@ def test_only_approver_and_admin_can_run_policy_replay(server):
         assert call(server, "POST", "/replay", role=role, body={})[0] == 403
     for role in ("approver", "admin"):
         assert call(server, "POST", "/replay", role=role, body={})[0] == 400
+
+
+def test_only_approver_and_admin_can_start_guard_demo(server):
+    for role in ("agent", "viewer"):
+        assert call(server, "POST", "/demo/run", role=role, body={})[0] == 403
+    for role in ("approver", "admin"):
+        assert call(server, "POST", "/demo/run", role=role, body={})[0] == 409
+    assert call(server, "GET", "/demo/status", role="viewer") == (
+        200, {"running": False, "enabled": False})
 
 
 def test_agent_and_admin_can_reach_authorization_validation(server):

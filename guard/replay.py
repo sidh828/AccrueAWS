@@ -57,7 +57,9 @@ def outcomes(policy_text):
 
 
 def _complete(context):
-    context = {**_DEFAULTS, **context, "limits": {
+    # Before the new-payee cap covered a payee's first 30 days, it checked
+    # this payment alone.
+    context = {**_DEFAULTS, "payee_recent_total": context["amount"], **context, "limits": {
         "recent_payees": authorize.FAMILY_LIMITS["recent_payees"],
         "recent_payees_flagged": authorize.FAMILY_LIMITS["recent_payees_flagged"],
         **context["limits"]}}

@@ -55,6 +55,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 #   ACCRUE_ALLOWED_CONTACTS comma-separated recipients /outbound always allows
 #   ACCRUE_TOKEN_KEY    verifies agents' signed delegation tokens; with
 #   ACCRUE_REQUIRE_TOKENS=1 a request without a valid token is refused.
+#   ACCRUE_PEOPLE       optional comma-separated people this guard serves
 #   Mint one for the agent:  ACCRUE_TOKEN_KEY=... python3 -m guard.tokens mint \
 #                              --person mom --agent bills-agent --day 50000
 #   A sub-agent narrows it (no key needed): python3 -m guard.tokens narrow TOKEN \
@@ -64,6 +65,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m guard.api --db ledger.db
 # The startup output includes separate viewer and approver dashboard links.
 # Use HTTPS or a trusted private network when binding beyond loopback.
+# Add --demo to enable the dashboard's ordered scenarios, run by the real guard.
 # Password-vault entries are still in memory and must be loaded at startup.
 
 # optional stand-in dashboard/API for a demo without the real guard:

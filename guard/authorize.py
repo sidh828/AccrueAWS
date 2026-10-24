@@ -333,6 +333,7 @@ RULE_OUTCOMES = {
     "breaker": "hold",
     "gift_card_needs_approval": "hold",
     "new_payee_needs_approval": "hold",
+    "new_payee_month_cap": "hold",
     "recent_payee_cap": "hold",
     "bill_increase": "hold",
     "daily_cap_needs_approval": "hold",
@@ -358,6 +359,11 @@ TOOL_CATEGORIES = {
 BREAKER_WINDOW = timedelta(minutes=10)
 KNOWN_BILL_CATEGORIES = {"utility", "rent"}
 KNOWN_BILL_LOOKBACK = timedelta(days=45)
+# A known bill is paid once a cycle: if the payee was already paid in the
+# last 20 days, this payment isn't the month's bill - it counts toward the
+# day like anything else. Without this, "your payment didn't go through,
+# pay again" could pay the power bill ten times in a day, all exempt.
+KNOWN_BILL_CYCLE = timedelta(days=20)
 RECENT_PAYEE_WINDOW = timedelta(days=30)
 
 
@@ -454,9 +460,11 @@ def authorize_payment(conn, *, person, chain, tool, amount_cents, payee, categor
     that branch of the chain may spend in 24 hours, and the tightest left
     applies (delegation_budget, delegation_tool).
     """
-    if type(amount_cents) is not int or not 0 <= amount_cents <= MAX_AMOUNT_CENTS:
+    # At least one cent: a $0 "payment" would make a stranger a payee she
+    # has paid before without moving any money.
+    if type(amount_cents) is not int or not 1 <= amount_cents <= MAX_AMOUNT_CENTS:
         raise ValueError(
-            "amount_cents must be an int between 0 and "
+            "amount_cents must be an int between 1 and "
             f"{MAX_AMOUNT_CENTS}, got {amount_cents!r}"
         )
     if type(tainted) is not bool:
@@ -506,11 +514,15 @@ def authorize_payment(conn, *, person, chain, tool, amount_cents, payee, categor
         day_since = ledger.utc_timestamp(now - BUDGET_WINDOW)
         recent_since = ledger.utc_timestamp(now - RECENT_PAYEE_WINDOW)
         is_gift_card = category == "gift_card"
+        # A known bill: a rent or utility payee last paid, as a bill, 20 to
+        # 45 days ago - once a cycle (KNOWN_BILL_CYCLE).
         last_bill = None
-        if category in KNOWN_BILL_CATEGORIES:
-            last_bill = aggregates.last_payment(
-                conn, person, payee, ledger.utc_timestamp(now - KNOWN_BILL_LOOKBACK)
-            )
+        last = aggregates.last_payment(conn, person, payee)
+        if (category in KNOWN_BILL_CATEGORIES and last is not None
+                and last[2] in KNOWN_BILL_CATEGORIES
+                and ledger.utc_timestamp(now - KNOWN_BILL_LOOKBACK) <= last[1]
+                <= ledger.utc_timestamp(now - KNOWN_BILL_CYCLE)):
+            last_bill = last[0]
         known_bill = last_bill is not None
         headroom = MAX_AMOUNT_CENTS
         for depth, budget in (delegation.budgets if delegation else ()):
@@ -539,6 +551,12 @@ def authorize_payment(conn, *, person, chain, tool, amount_cents, payee, categor
                 + (amount_cents if is_gift_card else 0),
             "new_payee": new_payee,
             "recent_payee": recent_payee,
+            # Everything to this payee since it was first paid, if that was in
+            # the last 30 days, plus this payment: the new-payee cap is on the
+            # payee's first 30 days, so "send $1 to verify, then $450" fails.
+            "payee_recent_total": (
+                aggregates.payee_total_since(conn, person, payee, recent_since)
+                if recent_payee else 0) + amount_cents,
             "recent_payees_total": aggregates.recent_payees_total(conn, person, recent_since)
                 + (amount_cents if new_payee or recent_payee else 0),
             "known_bill": known_bill,
