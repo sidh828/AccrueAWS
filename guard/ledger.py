@@ -95,6 +95,17 @@ CREATE TABLE IF NOT EXISTS overrides (
 
 CREATE INDEX IF NOT EXISTS idx_overrides_scope_id ON overrides (scope_id);
 
+-- Untrusted text that reached the agent (POST /inbound from an untrusted
+-- source). The guard serves one household, so any of it makes the whole
+-- household's next hours stricter - not just the session that saw it,
+-- because a new conversation is a new session (see api.answer_authorize).
+CREATE TABLE IF NOT EXISTS untrusted_inbound (
+    id         INTEGER PRIMARY KEY,
+    at         TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    source     TEXT NOT NULL
+);
+
 CREATE TRIGGER IF NOT EXISTS prevent_override_updates
 BEFORE UPDATE ON overrides
 BEGIN
@@ -143,9 +154,17 @@ def utc_timestamp(moment=None):
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+# How long a connection waits for another's write lock before giving up
+# with "database is locked". Each decision holds the lock for milliseconds
+# (Cedar's own timeout caps it at 2 s), so a burst of requests queues up
+# behind each other; SQLite's default of 5 s was too short for 60 at once on
+# a slow CI runner. Giving up is still safe - the API answers it as a hold.
+BUSY_TIMEOUT_SECONDS = 15
+
+
 def connect(db_path="ledger.db"):
     """Open a ledger database and create its schema if needed."""
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=BUSY_TIMEOUT_SECONDS)
     conn.executescript(SCHEMA)
     conn.commit()
     return conn
@@ -201,6 +220,20 @@ def _append(conn, table, row):
     conn.execute(f"INSERT INTO {table} ({columns}) VALUES ({', '.join('?' * len(row))})",
                  tuple(row.values()))
     return next_id
+
+
+def record_untrusted(conn, at, session_id, source):
+    """Note that untrusted text reached the agent at `at` (a ledger
+    timestamp). Commits."""
+    conn.execute("INSERT INTO untrusted_inbound (at, session_id, source) VALUES (?, ?, ?)",
+                 (at, session_id, source))
+    conn.commit()
+
+
+def untrusted_since(conn, since):
+    """Whether any untrusted text reached the agent at or after `since`."""
+    return conn.execute("SELECT 1 FROM untrusted_inbound WHERE at >= ? LIMIT 1",
+                        (since,)).fetchone() is not None
 
 
 def head(conn):

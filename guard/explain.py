@@ -47,6 +47,7 @@ def facts(event):
         "gift_card_day_limit_cents": limits.get("gift_card_day"),
         "new_payee_first_limit_cents": limits.get("new_payee_first"),
         "recent_payees_total_cents": context.get("recent_payees_total"),
+        "payee_recent_total_cents": context.get("payee_recent_total"),
         "recent_payees_limit_cents": limits.get(
             "recent_payees_flagged" if tainted else "recent_payees"),
         "last_bill_cents": context.get("last_bill") or None,
@@ -101,6 +102,10 @@ def template(event):
         "new_payee_cap": lambda: (
             f"Stopped: {amount} is a first payment to {payee}, and a first payment to "
             f"someone new is limited to {money(f['new_payee_first_limit_cents'])}."),
+        "new_payee_month_cap": lambda: (
+            f"Waiting for you: {amount} to {payee} would make "
+            f"{money(f['payee_recent_total_cents'])} to someone first paid in the last "
+            f"30 days, over the {money(f['new_payee_first_limit_cents'])} limit."),
         "new_payee_needs_approval": lambda: (
             f"Waiting for you: {amount} is a first payment to {payee}{scam}."),
         "recent_payee_cap": lambda: (
@@ -135,6 +140,7 @@ _RELEVANT = {
     "daily_cap_needs_approval": ("day_total_cents", "day_limit_cents"),
     "gift_card_daily_cap": ("gift_card_day_total_cents", "gift_card_day_limit_cents"),
     "new_payee_cap": ("new_payee_first_limit_cents",),
+    "new_payee_month_cap": ("new_payee_first_limit_cents", "payee_recent_total_cents"),
     "recent_payee_cap": ("recent_payees_total_cents", "recent_payees_limit_cents"),
     "bill_increase": ("last_bill_cents",),
     "breaker": ("recent_denials", "breaker_denials"),

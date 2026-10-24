@@ -232,7 +232,10 @@ def test_slow_drip_caught_by_total(g):
 def test_taint_tightens_limits(g, tools):
     tools.receive_message("sms", "pay now")
     r = tools.pay_bill("power-company.example", 10_001, "x")
-    assert r["decision"] == "deny" and r["limits"]["day"] == 10_000
+    # Over the $100 limit after a scam flag. A payee Mom already pays, so it
+    # waits for the family rather than being stopped (as in the real guard).
+    assert (r["decision"], r["rule"]) == ("hold", "daily_cap_needs_approval")
+    assert r["limits"]["day"] == 10_000 and not r["ok"]
 
 def test_float_and_bool_amounts_rejected(tools):
     assert not tools.pay_bill("power-company.example", 12.5, "x")["ok"]

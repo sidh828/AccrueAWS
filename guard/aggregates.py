@@ -130,16 +130,25 @@ def has_paid(conn, home, payee):
     ).fetchone() is not None
 
 
-def last_payment(conn, home, payee, since):
-    """The most recent amount allowed from this person to this payee at or
-    after `since`, or None."""
-    row = conn.execute(
-        "SELECT amount_cents FROM events "
-        "WHERE home = ? AND payee = ? AND decision = 'ALLOW' AND timestamp >= ? "
+def last_payment(conn, home, payee):
+    """The most recent payment allowed from this person to this payee, as
+    (amount_cents, timestamp, category), or None."""
+    return conn.execute(
+        "SELECT amount_cents, timestamp, category FROM events "
+        "WHERE home = ? AND payee = ? AND decision = 'ALLOW' "
         "ORDER BY id DESC LIMIT 1",
+        (normalize_scope(home), payee),
+    ).fetchone()
+
+
+def payee_total_since(conn, home, payee, since):
+    """Allowed from this person to this payee at or after `since`."""
+    row = conn.execute(
+        "SELECT COALESCE(SUM(amount_cents), 0) FROM events "
+        "WHERE home = ? AND payee = ? AND decision = 'ALLOW' AND timestamp >= ?",
         (normalize_scope(home), payee, since),
     ).fetchone()
-    return None if row is None else row[0]
+    return row[0]
 
 
 def denials_since(conn, home, since):

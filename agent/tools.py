@@ -32,6 +32,7 @@ TOOL_CATEGORY = DEFAULT_TOOL_CATEGORIES
 WINDOW_S = int(family_policy.BUDGET_WINDOW.total_seconds())
 BREAKER_WINDOW_S = int(family_policy.BREAKER_WINDOW.total_seconds())
 KNOWN_BILL_LOOKBACK_S = int(family_policy.KNOWN_BILL_LOOKBACK.total_seconds())
+KNOWN_BILL_CYCLE_S = int(family_policy.KNOWN_BILL_CYCLE.total_seconds())
 LIMITS_NORMAL = {
     "day": family_policy.FAMILY_LIMITS["day"],
     "gift_card_day": family_policy.FAMILY_LIMITS["gift_card_day"],
@@ -136,26 +137,23 @@ class FakeGuard:
             day = sum(e["amount_cents"] for e in live) + amt
             gift = sum(e["amount_cents"] for e in live if e["category"] == "gift_card") + (amt if cat == "gift_card" else 0)
             denials = [e for e in mine if e["decision"] == "deny" and now - e["_t"] < BREAKER_WINDOW_S]
-            prior_bills = [
-                e for e in mine
-                if e["decision"] == "allow"
-                and e["payee"] == req["payee"]
-                and now - e["_t"] < KNOWN_BILL_LOOKBACK_S
-            ]
-            if prior_bills:
-                last_bill = prior_bills[-1]["amount_cents"]
-            else:
-                seeded_bills = [
-                    amount for amount, paid_at in self._known_bill_history.get(req["payee"], [])
-                    if now - paid_at < KNOWN_BILL_LOOKBACK_S
-                ]
-                last_bill = seeded_bills[-1] if seeded_bills else None
+            # As in the real guard (authorize.KNOWN_BILL_CYCLE): a known bill is
+            # paid once a cycle, so it's the last payment to this payee that
+            # decides, and only if it was 20 to 45 days ago.
+            paid = [(e["amount_cents"], e["_t"]) for e in mine
+                    if e["decision"] == "allow" and e["payee"] == req["payee"]]
+            last = paid[-1] if paid else (self._known_bill_history.get(req["payee"]) or [None])[-1]
+            last_bill = None
+            if last is not None and KNOWN_BILL_CYCLE_S <= now - last[1] < KNOWN_BILL_LOOKBACK_S:
+                last_bill = last[0]
             known_bill = cat in family_policy.KNOWN_BILL_CATEGORIES and last_bill is not None
             new_payee = req["payee"] not in self.known_payees
 
             fired: set[str] = set()
+            # Over the day's limit: stopped for someone new (a bail wire), waits
+            # for the family for someone she's paid before (family.cedar).
             if not known_bill and day > lim["day"]:
-                fired.add("daily_cap")
+                fired.add("daily_cap" if new_payee else "daily_cap_needs_approval")
             if cat == "gift_card":
                 if tainted:
                     fired.add("gift_card_needs_approval")

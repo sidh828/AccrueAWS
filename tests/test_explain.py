@@ -47,11 +47,11 @@ def test_every_decision_reads_in_plain_english(conn):
     assert said(pay(conn, 12_000)) == "Allowed: $120.00 to grocer.example."
     assert said(pay(conn, 4_000, "dr-patel.example", "medical")) == (
         "Allowed: $40.00 to dr-patel.example, the first payment to them.")
-    assert said(pay(conn, 3_310, "columbia-gas.example", "utility")) == (
-        "Allowed: $33.10 to columbia-gas.example, a regular bill in line with last time.")
     assert said(pay(conn, 4_420, "columbia-gas.example", "utility")) == (
         "Waiting for you: $44.20 to columbia-gas.example is more than 20% over last "
-        "time ($33.10).")
+        "time ($29.80).")
+    assert said(pay(conn, 3_310, "columbia-gas.example", "utility")) == (
+        "Allowed: $33.10 to columbia-gas.example, a regular bill in line with last time.")
     assert said(pay(conn, 45_000, "giftcards.example", "gift_card")) == (
         "Stopped: that would make $450.00 in gift cards in 24 hours. The limit is $100.00.")
     assert said(pay(conn, 30_000, "zelle:new-contact", "transfer")) == (

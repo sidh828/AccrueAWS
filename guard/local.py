@@ -30,10 +30,11 @@ from . import api, authorize, ledger
 
 class LocalGuard:
     def __init__(self, db_path=None, clock=time.time, contacts=None, token_key=None,
-                 require_token=False):
+                 require_token=False, people=None):
         self.clock = clock
         self.fault = None  # e.g. "cedar killed": Cedar can't be reached while it's set
         self.token_key, self.require_token = token_key, require_token
+        self.people = None if people is None else {p.strip().lower() for p in people}
         # A file, not ":memory:": the suite calls from many threads at once,
         # and each call gets its own connection, as in the server - so
         # parallel requests really do race for the ledger's write lock.
@@ -60,12 +61,18 @@ class LocalGuard:
         with self._cedar():
             status, body = api.answer_authorize(self._ledger, req, self.sessions, now=now,
                                                 token_key=self.token_key,
-                                                require_token=self.require_token)
+                                                require_token=self.require_token,
+                                                people=self.people)
         return body if status in (200, 503) else {**api.UNAVAILABLE, "rule": "refused",
                                                     "error": body["error"]}
 
     def inbound(self, session_id, source, content):
-        return self._inbound.ingest(session_id, source, content).to_contract()
+        result = self._inbound.ingest(session_id, source, content)
+        if not result.trusted:  # the household's taint, as in api._inbound
+            at = ledger.utc_timestamp(datetime.fromtimestamp(self.clock(), tz=timezone.utc))
+            with self._ledger() as conn:
+                ledger.record_untrusted(conn, at, session_id, source)
+        return result.to_contract()
 
     def outbound(self, session_id, recipient, channel, content):
         return self._outbound.check(session_id, recipient, channel, content)
