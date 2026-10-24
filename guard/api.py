@@ -89,7 +89,7 @@ OPTIONAL = ("request_id", "reason")
 # column applies while the session is tainted, or ... for 6 hours"). It's the
 # household, not the session: taint keyed only on the session id the agent
 # sends was escaped by starting a new conversation.
-HOUSEHOLD_TAINT = timedelta(hours=6)
+HOUSEHOLD_TAINT = authorize.HOUSEHOLD_TAINT
 
 # What the agent gets when the guard itself is down: a hold, never an allow.
 UNAVAILABLE = {"decision": "hold", "rule": authorize.GUARD_UNAVAILABLE,

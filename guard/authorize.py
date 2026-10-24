@@ -27,6 +27,7 @@ POLICY_PATH = Path(__file__).parent / "policies" / "budget.cedar"
 # 12:01 AM would both fit. Without any window, a home that spent its budget
 # once was locked out forever.
 BUDGET_WINDOW = timedelta(hours=24)
+HOUSEHOLD_TAINT = timedelta(hours=6)
 
 # The Cedar CLI to run. Overridable so a demo or a test can point it at a
 # binary that hangs or is missing and show the guard failing closed.

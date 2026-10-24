@@ -348,7 +348,9 @@ def test_guard_down_holds_and_is_logged(g, tools):
 # ---- review round: contract decisions as mirrored by FakeGuard ---------------------
 def test_totals_include_current_request_and_needs_approval_only_on_hold(tools):
     r = tools.buy_gift_card("giftcards.example", 45_000, "x")
-    assert r["totals"] == {"day": 45_000, "gift_card_day": 45_000}
+    assert r["totals"] == {
+        "day": 45_000, "gift_card_day": 45_000, "recent_payees": 45_000,
+    }
     assert r["decision"] == "deny" and r["needs_approval"] is False
     denied = tools.pay_bill("brand-new.example", 25_000, "x")
     assert denied["decision"] == "deny" and denied["rule"] == "new_payee_cap"
