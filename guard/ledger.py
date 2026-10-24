@@ -204,11 +204,21 @@ def contract_rows(conn, since=0):
     """Events with an id above `since`, in id order, shaped as CLAUDE.md's
     event row - what GET /events and /stream send.
 
-    One field is added to the contract's: `resolves`, the event_id of the
-    held payment this row approves or denies (None otherwise). A held row
-    is settled once a later row resolves it; the held row itself never
-    changes. `explanation` and `row_hash` are None until explain.py and the
-    hash chain land.
+    Three fields are added to the contract's:
+
+    - `resolves`: the event_id of the held payment this row approves or
+      denies (None otherwise). A held row is settled once a later row
+      resolves it; the held row itself never changes.
+    - `notice`: "new_payee" (a first payment ever) or "recent_payee" (to
+      someone first paid in the last 30 days) on a payment that went
+      through, else None. It's the FYI alert for payments no rule stopped:
+      a patient scam never trips a rule, so this is how the family hears
+      about it.
+    - `known_bill`: the guard recognized this as a known bill (rent or a
+      utility within its usual amount), which the day's total leaves out.
+
+    `explanation` and `row_hash` are None until explain.py and the hash
+    chain land.
     """
     rows = conn.execute(
         f"SELECT {', '.join(_ROW_COLUMNS)} FROM events WHERE id > ? ORDER BY id",
@@ -217,6 +227,12 @@ def contract_rows(conn, since=0):
     out = []
     for event in map(_row_dict, rows):
         decision = event["decision"]
+        context = event["context"] or {}
+        notice = None
+        if decision == "ALLOW" and context.get("new_payee"):
+            notice = "new_payee"
+        elif decision == "ALLOW" and context.get("recent_payee"):
+            notice = "recent_payee"
         out.append({
             "event_id": event["id"],
             "ts": event["timestamp"],
@@ -233,6 +249,8 @@ def contract_rows(conn, since=0):
             "flagged": decision != "ALLOW",
             "row_hash": None,
             "resolves": event["resolves"],
+            "notice": notice,
+            "known_bill": bool(context.get("known_bill")),
         })
     return out
 

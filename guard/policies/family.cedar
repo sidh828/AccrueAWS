@@ -13,15 +13,42 @@
 @id("allow_by_default")
 permit (principal, action == Action::"pay", resource);
 
-// Daily total: $500, $100 after a scam flag. A known bill within its usual
-// amount is exempt (bill_increase covers it) but still counts toward the
-// total, so it shows on the running-total bar.
+// Daily total: $500, $100 after a scam flag. Known bills (rent, utilities
+// within their usual amount) are left out of the total and exempt here -
+// bill_increase covers them - so rent day doesn't block groceries.
+//
+// Over the limit to someone new is a deny: that's what stops a bail or
+// "safe account" wire. Over it to someone Margaret has paid before (the
+// plumber, her insurer) waits for the family's OK instead, because a deny
+// can't be approved.
 @id("daily_cap")
 forbid (principal, action == Action::"pay", resource)
 when {
-    !context.known_bill &&
+    !context.known_bill && context.new_payee &&
     context.day_total >
         (if context.tainted then context.limits.day_flagged else context.limits.day)
+};
+
+@id("daily_cap_needs_approval")
+forbid (principal, action == Action::"pay", resource)
+when {
+    !context.known_bill && !context.new_payee &&
+    context.day_total >
+        (if context.tainted then context.limits.day_flagged else context.limits.day)
+};
+
+// Recent payees: $500 per 30 days, all together, to payees first paid in the
+// last 30 days - so a patient drip to someone she met online, or one spread
+// over several new "accounts", waits for the family's OK once it adds up.
+// After a scam flag, any payment to a recent payee waits.
+@id("recent_payee_cap")
+forbid (principal, action == Action::"pay", resource)
+when {
+    (context.new_payee || context.recent_payee) &&
+    context.recent_payees_total >
+        (if context.tainted
+         then context.limits.recent_payees_flagged
+         else context.limits.recent_payees)
 };
 
 // Gift cards: $100 a day. After a scam flag, every gift card waits for the
