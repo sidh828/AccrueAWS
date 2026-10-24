@@ -39,3 +39,37 @@ the freeze.
 **Human decisions:** the problem, architecture, contract, spending rules,
 roles and layout all come from the team plan, not from this session.
 _To fill in: how the plan itself was drafted._
+
+## Sat Oct 24, noon to 12:15 PM: plain dashboard (Siddh, with Claude Code)
+
+**Asked:** Siddh asked Claude Code to get as far as it could on the
+dashboard's Tier 1 (wired to /events, Approve/Deny, phone alert) and to list
+next steps.
+
+**What it did:**
+
+- Added the CI workflow. It was held back from the import until the push
+  token had the `workflow` scope.
+- `dashboard/fake_api.py`: a stand-in API that speaks the contract
+  (`/events`, `/stream`, `/override`) and plays a scripted day for Mom, so
+  the dashboard doesn't wait on `guard/api.py`.
+- `dashboard/index.html` and `app.js`: the plain dashboard. It has the
+  running-total bar, the pause banner, "Needs your OK" with Approve/Deny, the
+  gift-card meter and the timeline. It puts API strings on the page as text,
+  never as HTML, because payees come from the agent's side.
+- `dashboard/alerts.py`: phone alerts through ntfy for stopped and held
+  payments.
+- `tests/test_dashboard.py`: the stand-in's rows match the contract's event
+  row, an override settles a held payment exactly once, and alerts are in
+  plain English.
+
+**How we checked:** 56 tests pass. We ran the stand-in and hit each endpoint
+with curl, ran the alert watcher in dry-run mode, and rendered the dashboard
+in headless Firefox, empty and populated, then looked at the screenshots.
+That caught two bugs, both fixed: the limit label ran off the screen when the
+line sat at the right edge, and the watcher's output was lost when piped.
+
+**Rejected:** nothing yet.
+
+**Human decisions:** none in this block. The contract questions it raised
+are for the team.

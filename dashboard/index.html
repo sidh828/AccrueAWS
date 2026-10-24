@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mom's spending</title>
+  <style>
+    /* Plain on purpose: the designer's frames replace this. Big type and
+       high contrast so it reads on a projector over Zoom. */
+    body { font: 20px/1.4 system-ui, sans-serif; color: #111; background: #fff;
+           max-width: 1100px; margin: 0 auto; padding: 24px 16px; }
+    h1 { font-size: 32px; margin: 0; }
+    h2 { font-size: 24px; margin: 32px 0 8px; }
+    #live { color: #555; font-size: 16px; margin: 0; }
+    #banner { background: #b00020; color: #fff; font-weight: 700; padding: 16px; margin: 16px 0; }
+    #headline { font-size: 48px; font-weight: 700; margin: 16px 0 0; }
+    #sub { margin: 0; }
+    #bar { position: relative; display: flex; height: 64px; margin: 48px 0 8px; background: #eee; }
+    .seg { flex: none; box-sizing: border-box; border-right: 2px solid #fff; }
+    .seg.allowed { background: #1b7f3b; }
+    .seg.held, .seg.pending { border: 3px dashed #a15c00; }
+    .seg.released { background: repeating-linear-gradient(45deg, #b00020 0 6px, #f6d5da 6px 12px); }
+    #limit { position: absolute; top: -32px; bottom: -8px; border-left: 4px solid #111; }
+    #limit span { position: absolute; top: 0; right: 8px; white-space: nowrap; font-size: 16px; font-weight: 700; }
+    .legend { font-size: 16px; color: #555; }
+    .card { border: 2px solid #a15c00; padding: 8px 16px; margin-bottom: 12px; }
+    .card .what { font-weight: 700; }
+    button { font: inherit; padding: 8px 24px; margin: 0 8px 8px 0; }
+    #timeline { padding-left: 0; list-style: none; }
+    #timeline li { padding: 8px 0; border-bottom: 1px solid #ddd; }
+    .time { color: #555; }
+    .state { font-weight: 700; }
+    .state.allowed { color: #1b7f3b; }
+    .state.held, .state.pending { color: #a15c00; }
+    .state.released { color: #b00020; }
+    .why { color: #333; font-size: 18px; }
+  </style>
+</head>
+<body>
+  <h1>Mom's spending today</h1>
+  <p id="live">Connecting…</p>
+  <div id="banner" hidden></div>
+
+  <p id="headline"></p>
+  <p id="sub"></p>
+  <div id="bar"></div>
+  <p class="legend">Solid: spent. Dashed: waiting for you. Striped: stopped.</p>
+
+  <h2>Needs your OK</h2>
+  <div id="needs-ok"></div>
+
+  <h2>By category</h2>
+  <div id="meters"></div>
+
+  <h2>Timeline</h2>
+  <ol id="timeline"></ol>
+
+  <script src="app.js"></script>
+</body>
+</html>

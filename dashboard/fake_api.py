@@ -1,0 +1,232 @@
+"""A stand-in for the guard's API, so the dashboard can be built before
+guard/api.py exists. It speaks the contract in CLAUDE.md:
+
+    GET  /events?since=<id>   rows with event_id > id, oldest first
+    GET  /stream              the same rows as server-sent events, live
+    POST /override            {event_id, action: approve|deny}
+
+and plays a scripted day for Mom: two normal payments, then a gift-card
+scam that switches to Zelle and a sub-agent until payments pause, then a
+plumber's bill caught in the pause. It also serves the dashboard, so one
+command runs both:
+
+    python3 dashboard/fake_api.py              # http://127.0.0.1:8001/
+    python3 dashboard/fake_api.py --step 1     # a new payment every second
+    python3 dashboard/fake_api.py --host 0.0.0.0   # reachable from a phone
+
+Nothing here is real: no Cedar, no money, and the hashes chain only
+within this process.
+"""
+
+import argparse
+import hashlib
+import json
+import threading
+import time
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+HERE = Path(__file__).parent
+STATIC = {
+    "/": ("index.html", "text/html; charset=utf-8"),
+    "/index.html": ("index.html", "text/html; charset=utf-8"),
+    "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+}
+
+BILLS = ["mom", "bills-agent"]
+SUBAGENT = ["mom", "bills-agent", "giftcard-subagent"]
+PAUSED = "Payments are paused after 3 blocked attempts in 10 minutes."
+
+# Mom's day: tool, amount_cents, payee, category, chain, decision, rule,
+# explanation. The decisions follow the normal column of CLAUDE.md's
+# spending rules ($500 a day, $100 of gift cards, $200 to a new payee,
+# 3 denials in 10 minutes and everything holds).
+SCRIPT = [
+    ("pay_bill", 12000, "ohio-power.example", "utility", BILLS, "allow", None,
+     "Power bill, in line with last month's."),
+    ("buy_gift_card", 5000, "giftcards.example", "gift_card", BILLS, "allow", None,
+     "Birthday gift card, under today's $100 gift card limit."),
+    ("buy_gift_card", 45000, "giftcards.example", "gift_card", BILLS, "deny",
+     "gift_card_daily_cap", "That would make $500 in gift cards today. The limit is $100."),
+    ("buy_gift_card", 45000, "giftcards.example", "gift_card", BILLS, "deny",
+     "gift_card_daily_cap", "That would make $500 in gift cards today. The limit is $100."),
+    ("send_zelle", 45000, "zelle:new-contact", "transfer", BILLS, "deny",
+     "new_payee_cap", "A first payment to someone new is limited to $200."),
+    ("buy_gift_card", 30000, "giftcards.example", "gift_card", SUBAGENT, "hold",
+     "breaker", PAUSED),
+    ("pay_bill", 18000, "plumber.example", "home_repair", BILLS, "hold",
+     "breaker", PAUSED),
+]
+STATUS = {"allow": "allowed", "deny": "released", "hold": "held"}
+
+
+class FakeGuard:
+    """Event rows in memory, plus a feed of every row as it was added or
+    changed, which /stream clients follow."""
+
+    def __init__(self):
+        self.rows = {}
+        self.feed = []
+        self.cond = threading.Condition()
+        self._prev_hash = "0" * 64
+
+    def add(self, tool, amount_cents, payee, category, chain, decision, rule, explanation):
+        with self.cond:
+            row = {
+                "event_id": len(self.rows) + 1,
+                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "status": STATUS[decision], "person": chain[0], "chain": list(chain),
+                "tool": tool, "amount_cents": amount_cents, "payee": payee,
+                "category": category, "decision": decision, "rule": rule,
+                "explanation": explanation, "flagged": decision != "allow",
+            }
+            body = json.dumps(row, sort_keys=True, separators=(",", ":"))
+            self._prev_hash = hashlib.sha256((self._prev_hash + body).encode()).hexdigest()
+            row["row_hash"] = self._prev_hash
+            self._publish(row)
+            return row
+
+    def override(self, event_id, action):
+        """Approve or deny a held row and return it. Raises KeyError for an
+        unknown row and ValueError for one that isn't waiting."""
+        with self.cond:
+            row = self.rows[event_id]
+            if row["status"] != "held":
+                raise ValueError(f"event {event_id} is {row['status']}, not held")
+            decision = "allow" if action == "approve" else "deny"
+            row = {**row, "decision": decision, "status": STATUS[decision]}
+            self._publish(row)
+            return row
+
+    def since(self, event_id):
+        with self.cond:
+            return [row for i, row in sorted(self.rows.items()) if i > event_id]
+
+    def _publish(self, row):
+        self.rows[row["event_id"]] = row
+        self.feed.append(row)
+        self.cond.notify_all()
+
+
+class Handler(BaseHTTPRequestHandler):
+    guard = None  # a FakeGuard, set by make_server
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._cors()
+        self.end_headers()
+
+    def do_GET(self):
+        url = urlparse(self.path)
+        if url.path in STATIC:
+            name, content_type = STATIC[url.path]
+            return self._send(200, (HERE / name).read_bytes(), content_type)
+        if url.path == "/events":
+            try:
+                since = int(parse_qs(url.query).get("since", ["0"])[0])
+            except ValueError:
+                return self._json(400, {"error": "since must be an integer"})
+            return self._json(200, self.guard.since(since))
+        if url.path == "/stream":
+            return self._stream()
+        self._json(404, {"error": "not found"})
+
+    def do_POST(self):
+        if urlparse(self.path).path != "/override":
+            return self._json(404, {"error": "not found"})
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+            event_id, action = body["event_id"], body["action"]
+            if type(event_id) is not int or action not in ("approve", "deny"):
+                raise ValueError
+        except (ValueError, KeyError, TypeError):
+            return self._json(400, {"error": "expected {event_id: int, action: approve|deny}"})
+        try:
+            self._json(200, self.guard.override(event_id, action))
+        except KeyError:
+            self._json(404, {"error": f"no event {event_id}"})
+        except ValueError as err:
+            self._json(409, {"error": str(err)})
+
+    def _stream(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self._cors()
+        self.end_headers()
+        last = self.headers.get("Last-Event-ID", "0")
+        last = int(last) if last.isdigit() else 0
+        guard = self.guard
+        with guard.cond:
+            pending, seen = guard.since(last), len(guard.feed)
+        try:
+            while True:
+                for row in pending:
+                    # An id line only for new rows: a changed old row must
+                    # not move the browser's Last-Event-ID backwards.
+                    new = row["event_id"] > last
+                    last = max(last, row["event_id"])
+                    head = f"id: {row['event_id']}\n" if new else ""
+                    self.wfile.write(f"{head}data: {json.dumps(row)}\n\n".encode())
+                if not pending:
+                    self.wfile.write(b": keepalive\n\n")
+                self.wfile.flush()
+                with guard.cond:
+                    guard.cond.wait_for(lambda: len(guard.feed) > seen, timeout=15)
+                    pending, seen = guard.feed[seen:], len(guard.feed)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _cors(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+
+    def _json(self, code, data):
+        self._send(code, json.dumps(data).encode(), "application/json")
+
+    def _send(self, code, body, content_type):
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self._cors()
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass  # keep the terminal quiet
+
+
+def make_server(guard, host="127.0.0.1", port=8001):
+    handler = type("BoundHandler", (Handler,), {"guard": guard})
+    return ThreadingHTTPServer((host, port), handler)
+
+
+def play(guard, step):
+    for row in SCRIPT:
+        time.sleep(step)
+        guard.add(*row)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Fake guard API that also serves the dashboard")
+    parser.add_argument("--host", default="127.0.0.1", help="0.0.0.0 to open it from a phone")
+    parser.add_argument("--port", type=int, default=8001)
+    parser.add_argument("--step", type=float, default=3.0,
+                        help="seconds between scripted payments (default 3)")
+    args = parser.parse_args(argv)
+
+    guard = FakeGuard()
+    server = make_server(guard, args.host, args.port)
+    threading.Thread(target=play, args=(guard, args.step), daemon=True).start()
+    print(f"dashboard on http://{args.host}:{args.port}/  (Ctrl-C to stop)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

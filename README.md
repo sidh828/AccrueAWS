@@ -38,6 +38,11 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 # the original accrue demo: five $9,999 transfers against a $10,000
 # budget. The first is allowed, the rest are denied.
 .venv/bin/python -m guard.main
+
+# the family dashboard against a stand-in API (until guard/api.py exists):
+# open http://127.0.0.1:8001/ and watch Mom's scripted day arrive
+python3 dashboard/fake_api.py
+python3 dashboard/alerts.py --dry-run   # phone alerts, printed instead of sent
 ```
 
 ## Layout
