@@ -5,13 +5,19 @@ that's what makes the totals in aggregates.py trustworthy.
 """
 
 import sqlite3
+from datetime import datetime, timezone
 
+# `home` is the first segment of scope_id (see home_scope), stored so the
+# budget and breaker queries in aggregates.py are an indexed equality
+# lookup instead of a scan of every row ever logged. (home, timestamp)
+# serves the windowed total; (home) serves "last event" in id order.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
     id          INTEGER PRIMARY KEY,
     timestamp   TEXT NOT NULL,
     session_id  TEXT NOT NULL,
     scope_id    TEXT NOT NULL,
+    home        TEXT NOT NULL,
     action      TEXT NOT NULL,
     resource    TEXT NOT NULL,
     cost_usd    REAL,
@@ -20,6 +26,8 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_session_id ON events (session_id);
 CREATE INDEX IF NOT EXISTS idx_events_scope_id ON events (scope_id);
+CREATE INDEX IF NOT EXISTS idx_events_home ON events (home);
+CREATE INDEX IF NOT EXISTS idx_events_home_time ON events (home, timestamp);
 
 CREATE TRIGGER IF NOT EXISTS prevent_event_updates
 BEFORE UPDATE ON events
@@ -77,6 +85,28 @@ def normalize_scope(scope_id):
     return scope_id.lower()
 
 
+def home_scope(scope_id):
+    """The "home" segment of a scope path - "agent-a" for both "agent-a"
+    and "agent-a/task-checkout-flow". authorize.py enforces the budget and
+    the breaker here rather than at the full path, because the task segment
+    is free-form: if each task had its own budget, inventing a new task
+    name would buy a fresh $10,000 every time.
+    """
+    return scope_id.split("/", 1)[0]
+
+
+def utc_timestamp(moment=None):
+    """The one timestamp format the ledger writes: UTC, fixed width, "Z".
+
+    Time windows compare timestamps as strings, which only orders them
+    correctly when every one has the same shape. isoformat() doesn't
+    guarantee that: it drops the microseconds when they're zero and writes
+    "+00:00" where the API contract writes "Z".
+    """
+    moment = moment or datetime.now(timezone.utc)
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 def connect(db_path="ledger.db"):
     """Open a ledger database and create its schema if needed."""
     conn = sqlite3.connect(db_path)
@@ -102,9 +132,10 @@ def insert_event(conn, timestamp, session_id, action, resource, cost_usd, decisi
     scope_id = normalize_scope(scope_id)
     cursor = conn.execute(
         "INSERT INTO events "
-        "(timestamp, session_id, scope_id, action, resource, cost_usd, decision) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (timestamp, session_id, scope_id, action, resource, cost_usd, decision),
+        "(timestamp, session_id, scope_id, home, action, resource, cost_usd, decision) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (timestamp, session_id, scope_id, home_scope(scope_id), action, resource,
+         cost_usd, decision),
     )
     return cursor.lastrowid
 

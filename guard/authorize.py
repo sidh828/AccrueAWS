@@ -15,12 +15,18 @@ import json
 import math
 import subprocess
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import aggregates, breaker, ledger
 
 POLICY_PATH = Path(__file__).parent / "policies" / "budget.cedar"
+
+# Spending older than this no longer counts toward the budget. Rolling, not
+# calendar: with a midnight reset, a full budget at 11:59 PM and another at
+# 12:01 AM would both fit. Without any window, a home that spent its budget
+# once was locked out forever.
+BUDGET_WINDOW = timedelta(hours=24)
 
 
 def _entity_uid(entity_type, entity_id):
@@ -108,6 +114,9 @@ def authorize_transfer(conn, session_id, resource, amount_usd, scope_id=None):
     containing "/" can't be used that way (see below), so pass scope_id
     explicitly for those.
 
+    The budget covers what the home spent in the last BUDGET_WINDOW. The
+    breaker has no window: once tripped, it stays tripped until an override.
+
     The budget and the breaker are enforced at the scope's *home* - its
     first path segment - not at the full path: "agent-a/task-x" and
     "agent-a/task-y" share one budget, and a DENY in either trips both.
@@ -149,7 +158,8 @@ def authorize_transfer(conn, session_id, resource, amount_usd, scope_id=None):
 
     conn.execute("BEGIN IMMEDIATE")
     try:
-        timestamp = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
+        timestamp = ledger.utc_timestamp(now)
 
         # A tripped home doesn't get to ask again, no matter how small the
         # amount, how much cumulative-cost headroom remains, or which task
@@ -164,7 +174,9 @@ def authorize_transfer(conn, session_id, resource, amount_usd, scope_id=None):
             conn.commit()
             return "DENY"
 
-        already_spent = aggregates.cumulative_cost_for_scope(conn, home)
+        already_spent = aggregates.cumulative_cost_for_scope(
+            conn, home, since=ledger.utc_timestamp(now - BUDGET_WINDOW)
+        )
         prospective_total = already_spent + amount_usd
 
         decision = _ask_cedar(

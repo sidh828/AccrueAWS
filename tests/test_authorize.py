@@ -3,7 +3,7 @@ the thing that actually keeps score, and that it fails closed rather than
 open when Cedar can't be trusted.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -158,6 +158,24 @@ def test_scope_names_are_case_insensitive(conn):
     )
     conn.commit()
     assert authorize.authorize_transfer(conn, "s3", "acct-1234", 1, scope_id="mom") == "ALLOW"
+
+
+def test_budget_counts_only_the_last_24_hours(conn):
+    """Regression test: authorize_transfer never passed a window, so the
+    budget was lifetime - $9,999 spent a year ago still blocked $2 today.
+    Only the last authorize.BUDGET_WINDOW counts now."""
+    now = datetime.now(timezone.utc)
+    for hours_ago, amount in [(25, 9000), (23, 500)]:
+        ledger.insert_event(
+            conn, ledger.utc_timestamp(now - timedelta(hours=hours_ago)), "s0",
+            "transfer", "acct-1234", amount, "ALLOW", scope_id="mom",
+        )
+    conn.commit()
+
+    # 25 hours ago has aged out; 23 hours ago still counts: 500 + 9500 is
+    # exactly the $10,000 cap, and $1 more is over it.
+    assert authorize.authorize_transfer(conn, "s1", "acct-1234", 9500, scope_id="mom") == "ALLOW"
+    assert authorize.authorize_transfer(conn, "s1", "acct-1234", 1, scope_id="mom") == "DENY"
 
 
 def test_session_id_with_a_slash_is_not_split_into_a_home(conn):

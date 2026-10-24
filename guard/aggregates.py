@@ -5,7 +5,9 @@ so it must not count toward the next check — otherwise a burst of rejected
 requests would itself push a session over budget.
 """
 
-from .ledger import normalize_scope
+# home_scope lives in ledger.py now (insert_event stores it); it's still
+# importable from here, where authorize.py has always found it.
+from .ledger import home_scope, normalize_scope
 
 
 def cumulative_cost(conn, session_id):
@@ -41,15 +43,25 @@ def distinct_resource_count(conn, session_id):
 # the full design writeup; these two are the pieces authorize.py needs to
 # actually use a scope instead of a lone session.
 
-def _escape_like(value):
-    """Escape a string for safe use inside a SQL LIKE pattern.
+def _scope_filter(scope_id):
+    """WHERE clause and params selecting a normalized scope_id plus
+    everything nested under it.
 
-    % and _ are LIKE wildcards; without escaping them, a scope_id that
-    happens to contain one (e.g. "a_b") would match more than its own
-    literal name when used as a prefix (e.g. "a_b/..." would also match
-    "aXb/..."). Must be paired with `ESCAPE '\\'` in the query.
+    - "" is the root: every row.
+    - A home ("agent-a", no "/") is an indexed equality on the `home`
+      column. That's the query authorize.py runs on every request.
+    - A deeper path ("agent-a/task-x") is the scope itself, or anything in
+      the half-open range ["agent-a/task-x/", "agent-a/task-x0"), since "0"
+      is the character right after "/". That's exactly the strings starting
+      with the prefix, compared byte for byte: no LIKE, so no wildcards to
+      escape and no case folding, and the scope_id index can serve it.
     """
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    if scope_id == "":
+        return "1", []
+    if "/" not in scope_id:
+        return "home = ?", [scope_id]
+    return ("(scope_id = ? OR (scope_id >= ? AND scope_id < ?))",
+            [scope_id, scope_id + "/", scope_id + "0"])
 
 
 def cumulative_cost_for_scope(conn, scope_id, since=None):
@@ -66,35 +78,19 @@ def cumulative_cost_for_scope(conn, scope_id, since=None):
 
     Only decision = 'ALLOW' rows count, same reason as cumulative_cost
     above: a DENYed attempt never happened.
-    """
-    scope_id = normalize_scope(scope_id)
-    if scope_id == "":
-        query = "SELECT COALESCE(SUM(cost_usd), 0) FROM events WHERE decision = 'ALLOW'"
-        params = []
-    else:
-        query = (
-            "SELECT COALESCE(SUM(cost_usd), 0) FROM events "
-            "WHERE decision = 'ALLOW' "
-            "AND (scope_id = ? OR scope_id LIKE ? ESCAPE '\\')"
-        )
-        params = [scope_id, _escape_like(scope_id) + "/%"]
 
+    `since` must be in ledger.utc_timestamp's format: the comparison is on
+    strings.
+    """
+    where, params = _scope_filter(normalize_scope(scope_id))
+    query = ("SELECT COALESCE(SUM(cost_usd), 0) FROM events "
+             f"WHERE {where} AND decision = 'ALLOW'")
     if since is not None:
         query += " AND timestamp >= ?"
         params.append(since)
 
     row = conn.execute(query, params).fetchone()
     return row[0]
-
-
-def home_scope(scope_id):
-    """The "home" segment of a scope path - "agent-a" for both "agent-a"
-    and "agent-a/task-checkout-flow". authorize.py enforces the budget and
-    the breaker here rather than at the full path, because the task segment
-    is free-form: if each task had its own budget, inventing a new task
-    name would buy a fresh $10,000 every time.
-    """
-    return scope_id.split("/", 1)[0]
 
 
 def last_event_for_scope(conn, scope_id):
@@ -104,11 +100,10 @@ def last_event_for_scope(conn, scope_id):
     thing that happened anywhere in a scope was a DENY - a DENY in one task
     has to trip its siblings too, or the agent just moves to another task.
     """
-    scope_id = normalize_scope(scope_id)
+    where, params = _scope_filter(normalize_scope(scope_id))
     return conn.execute(
         "SELECT id, timestamp, session_id, scope_id, action, resource, "
-        "cost_usd, decision FROM events "
-        "WHERE scope_id = ? OR scope_id LIKE ? ESCAPE '\\' "
+        f"cost_usd, decision FROM events WHERE {where} "
         "ORDER BY id DESC LIMIT 1",
-        (scope_id, _escape_like(scope_id) + "/%"),
+        params,
     ).fetchone()
