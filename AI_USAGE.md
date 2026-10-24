@@ -100,3 +100,84 @@ hostile row (tool `constructor`, rule `toString`, null fields).
 team decisions in issue #1.
 
 **Human decisions:** Siddh picked which findings to fix.
+
+## Sat Oct 24, 11:40 AM to 1:05 PM: guard review and guard Tier 1 (Dharvik, with Claude Code)
+
+**Asked:** Dharvik gave Claude Code (Claude Opus 5.5) the team plan, the
+accrue repo and this one, and asked for a detailed review. Then, one step
+at a time: post the review for the team, make the four known bug-fix
+commits, and keep going on `guard/`.
+
+**What it did:**
+
+- Reviewed the plan and both repos, and posted the result as issue #1:
+  confirmed bugs, contract gaps, to-dos for each person, demo risks, and Q&A
+  for judging. It reproduced each bug by running the guard against the
+  real Cedar CLI before writing it up.
+- #2 (merged): the plan's four bug fixes, one commit and one regression
+  test each:
+  - the breaker ordered by row id
+  - lowercase scope names
+  - indexed queries with a 24-hour window
+  - a timeout on the Cedar call
+- #4: integer cents everywhere, a `request_id` that makes retries safe, and
+  the policy file as a parameter.
+- #7: the family spending rules in `guard/policies/family.cedar`, plus:
+  - `authorize_payment` returning allow, deny or hold
+  - holds the family settles by appending a row (`resolve`), so no row
+    ever changes
+  - event rows shaped as the contract's
+  - failing closed to a hold when Cedar is unavailable
+- #11: a hash chain over every ledger row, and `verify()`. It names the
+  first bad row, and an anchor or a key catches someone re-hashing after an
+  edit.
+
+**How we checked:**
+
+- Every bug was reproduced first with a probe script against Cedar 4.12.0,
+  and the same script was re-run after the fixes.
+- Each regression test fails on the old code. One (the 24-hour window)
+  failed there for the wrong reason, a missing helper, so we re-ran that
+  scenario against the old code by hand to confirm the behavior was wrong.
+- `cedar validate` passes for both policies; a test runs it for the family
+  policy.
+- The suite went 56 → 60 → 65 → 88 → 97 passing, and the concurrency
+  tests were run several times. Fifty $50 payments fired at once allow
+  exactly $500.
+- Measured instead of assumed:
+  - about 2.4 ms per Cedar call
+  - `authorize` with 200k rows went from about 34 ms to about 5 ms
+  - `verify()` takes about 14 ms over 2,000 rows
+- CI is green on #2, #4 and #7.
+
+**Rejected or changed:**
+
+- **cedarpy:** not adopted. The plan's fallback was for a slow CLI, and
+  the CLI measured at about 2.4 ms.
+- **The plan's `pending` row:** dropped from the reservation step. The
+  decision happens inside one locked transaction, so no other request can
+  ever see a pending row. Only `held` waits.
+- **Holding first payments over $200:** Claude had proposed it. We changed
+  it to deny, to match the dashboard's stand-in API, which the team already
+  had.
+- **Two of Claude's tests were wrong, not the guard.** They expected a hold
+  where the stricter $100 daily cap after a scam flag correctly denies.
+  Running the tests caught it, and the tests were fixed.
+- **The external review:** an AI-generated adoption review of accrue from
+  Oct 14 overlapped with this one. Its findings were checked against the
+  code before being used, and two (a global policy path and missing
+  coverage tooling) were added to the to-dos.
+
+**Human decisions (Dharvik):**
+
+- what to review
+- posting the review as issue #1 for everyone
+- the order of the work: bug fixes, then cents, then the family rules, the
+  hash chain before the API
+- going ahead on the unanswered contract proposals, but posting them on
+  #1 first with a 3 PM deadline for objections
+- turning on the PR auto-fix monitor
+
+The rule-to-outcome table and the "new rows only" log were Claude's
+proposals. Dharvik adopted them pending the team's answer on #1. Siddh
+reviewed and merged #2.
