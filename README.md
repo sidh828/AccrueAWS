@@ -39,7 +39,13 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 # budget. The first is allowed, the rest are denied.
 .venv/bin/python -m guard.main
 
-# the family dashboard against a stand-in API (until guard/api.py exists).
+# the live guard API (agent tools call /authorize, /inbound and /outbound):
+# set ACCRUE_ALLOWED_CONTACTS to a comma-separated trusted-recipient list first
+# .venv/bin/uvicorn guard.api:app --host 127.0.0.1 --port 8000
+# Wall taint and received-code state currently live in this one server process;
+# run one worker and keep it running until that state is persisted.
+
+# the family dashboard against a stand-in API:
 # It prints two links: the one ending in #token=... can approve payments
 # (open it once on each device that should), the other is read-only.
 python3 dashboard/fake_api.py
