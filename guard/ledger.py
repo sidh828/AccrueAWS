@@ -95,6 +95,21 @@ CREATE TABLE IF NOT EXISTS overrides (
 
 CREATE INDEX IF NOT EXISTS idx_overrides_scope_id ON overrides (scope_id);
 
+-- The payout outbox. The guard is the only thing that can pay (CLAUDE.md),
+-- so every payment that goes through - allowed outright, or held and then
+-- approved by the family - queues exactly one payout here, in the same
+-- transaction as the decision. Whatever sends money takes from this queue
+-- and marks each one sent; it never acts on an /authorize answer, which a
+-- retried request_id returns again. UNIQUE(event_id) is the "at most once".
+CREATE TABLE IF NOT EXISTS payouts (
+    id           INTEGER PRIMARY KEY,
+    event_id     INTEGER NOT NULL UNIQUE REFERENCES events (id),
+    queued_at    TEXT NOT NULL,
+    payee        TEXT NOT NULL,
+    amount_cents INTEGER NOT NULL CHECK (typeof(amount_cents) = 'integer' AND amount_cents > 0),
+    sent_at      TEXT
+);
+
 -- Untrusted text that reached the agent (POST /inbound from an untrusted
 -- source). The guard serves one household, so any of it makes the whole
 -- household's next hours stricter - not just the session that saw it,
@@ -220,6 +235,38 @@ def _append(conn, table, row):
     conn.execute(f"INSERT INTO {table} ({columns}) VALUES ({', '.join('?' * len(row))})",
                  tuple(row.values()))
     return next_id
+
+
+def queue_payout(conn, event_id, at, payee, amount_cents):
+    """Queue the one payout for payment `event_id`. The caller owns the
+    transaction - it's the same one that records the decision. Queueing
+    the same event twice is a no-op: that's what makes paying at most once
+    something the database guarantees."""
+    conn.execute(
+        "INSERT OR IGNORE INTO payouts (event_id, queued_at, payee, amount_cents) "
+        "VALUES (?, ?, ?, ?)",
+        (event_id, at, payee, amount_cents),
+    )
+
+
+def queued_payouts(conn):
+    """Payouts not yet sent, oldest first, as dicts."""
+    rows = conn.execute(
+        "SELECT id, event_id, queued_at, payee, amount_cents FROM payouts "
+        "WHERE sent_at IS NULL ORDER BY id"
+    ).fetchall()
+    return [dict(zip(("payout_id", "event_id", "queued_at", "payee", "amount_cents"), r))
+            for r in rows]
+
+
+def mark_sent(conn, payout_id, at):
+    """Record that a payout went out. True the first time; False if it had
+    already been marked, so a sender that crashed and retries can tell it
+    must not send again. Commits."""
+    sent = conn.execute("UPDATE payouts SET sent_at = ? WHERE id = ? AND sent_at IS NULL",
+                        (at, payout_id)).rowcount == 1
+    conn.commit()
+    return sent
 
 
 def record_untrusted(conn, at, session_id, source):

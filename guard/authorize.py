@@ -575,6 +575,8 @@ def authorize_payment(conn, *, person, chain, tool, amount_cents, payee, categor
             payee=payee, category=category, tool=tool, chain=chain,
             reason=reason, rule=rule, context=context,
         )
+        if decision == "ALLOW":  # the one payout, in the same transaction
+            ledger.queue_payout(conn, event_id, ledger.utc_timestamp(now), payee, amount_cents)
         conn.commit()
         return _response(event_id, decision, rule, context)
     except Exception:
@@ -614,6 +616,9 @@ def resolve(conn, event_id, action, authorized_by, now=None):
             reason=f"{action}d by {authorized_by.strip()}",
             rule="approved_by_family" if approved else "denied_by_family",
         )
+        if approved:  # the held payment's one payout, keyed by the held row
+            ledger.queue_payout(conn, event_id, ledger.utc_timestamp(now), held["payee"],
+                                held["amount_cents"])
         conn.commit()
         return new_id
     except Exception:
