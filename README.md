@@ -41,7 +41,9 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 
 # the live guard API (agent tools call /authorize, /inbound and /outbound;
 # the dashboard reads /events and /stream and approves through /override).
-# It prints the dashboard links. Keys, generated once and kept stable and
+# It prints the dashboard links. The agent should classify pay_bill as utility
+# or rent so the known-bill rule applies; plain "bill" is a general payment.
+# Keys, generated once and kept stable and
 # outside the database:
 #   ACCRUE_WALL_KEY     keys the walls' stored code digests (32+ bytes); without
 #                       it, taint and received codes are forgotten on restart

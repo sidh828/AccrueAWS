@@ -365,6 +365,31 @@ def test_a_short_wall_key_is_refused(tmp_path):
         api.make_server(str(tmp_path / "ledger.db"), TOKEN, port=0, wall_key="too-short")
 
 
+def test_the_agents_bill_category_reaches_the_guard(guard):
+    """Ported from #16 (Benji): ToolBox.pay_bill(category=...) sends the kind
+    of bill, and the real guard uses it - a utility paid last month is a
+    known bill, so it's left out of the day's total."""
+    from datetime import datetime, timedelta, timezone
+
+    from agent.tools import HttpGuard, ToolBox
+
+    conn = ledger.connect(guard["db"])
+    ledger.insert_event(
+        conn, ledger.utc_timestamp(datetime.now(timezone.utc) - timedelta(days=30)), "s0",
+        "pay", "aep-ohio.example", 11_000, "ALLOW", scope_id="mom/bills-agent",
+        payee="aep-ohio.example", category="utility")
+    conn.commit()
+    tools = ToolBox(HttpGuard(guard["base"]), session_id="sess-bills")
+    result = tools.pay_bill("aep-ohio.example", 12_000, "power bill", category="utility")
+    assert result["ok"] and result["totals"]["day"] == 0
+    [row] = call(guard, "GET", "/events?since=1")[1]
+    assert (row["category"], row["known_bill"]) == ("utility", True)
+
+    # A tool can't claim a category it doesn't pay: refused, not paid.
+    refused = tools.pay_bill("giftcards.example", 5_000, "card", category="gift_card")
+    assert refused["ok"] is False
+
+
 def test_a_new_session_does_not_escape_taint(guard):
     """Found in review: taint was keyed only on the session id the agent
     sends, so a scam text in one conversation and a payment from a new one
