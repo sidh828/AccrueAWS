@@ -97,6 +97,15 @@ def broken(conn):
         if len(denials) >= limits["breaker_denials_flagged" if tainted else "breaker_denials"]:
             problems.append(f"{label}: allowed with {len(denials)} denials in 10 min")
 
+    # Exactly one payout for every payment that went through - allowed by
+    # the guard, or held and then approved - and none for anything else.
+    payouts = {e: n for e, n in conn.execute(
+        "SELECT event_id, COUNT(*) FROM payouts GROUP BY event_id")}
+    paid = {e["id"] for e in allowed if e["resolves"] is None and e["context"] is not None}
+    paid |= {e["resolves"] for e in allowed if e["resolves"] is not None}
+    if set(payouts) != paid or any(n != 1 for n in payouts.values()):
+        problems.append(f"payouts don't match payments: {sorted(set(payouts) ^ paid)[:5]}")
+
     # Nothing allowed when the rules engine couldn't answer.
     for e in events:
         if e["rule"] == authorize.GUARD_UNAVAILABLE and e["decision"] != "HOLD":
