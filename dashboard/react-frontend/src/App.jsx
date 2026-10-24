@@ -35,7 +35,7 @@ function Sidebar({ view, setView }) {
 }
 
 export default function App() {
-  const {events, connection, error, busyId, override, runDemo, demoBusy, canRunDemo, limits: apiLimits } = useGuardEvents();
+  const {events, connection, error, busyId, override, runDemo, demoBusy, canRunDemo, canApprove, limits: apiLimits } = useGuardEvents();
   const limits = useMemo(() => limitsFrom(apiLimits), [apiLimits]);
   const proof = useVerify(events.length);
   const [view, setView] = useState('overview');
@@ -71,7 +71,7 @@ export default function App() {
                 <div className="column-stack">
                   <section className="panel activity-panel"><div className="section-header"><div><div className="section-icon blue-icon"><Activity size={17}/></div><h3>Recent activity</h3></div><button className="text-link" onClick={() => setView('activity')}>View all <ArrowRight size={16}/></button></div><ActivityTimeline events={summary.today}/></section>
                 </div>
-                <div className="column-stack"><ApprovalQueue waiting={summary.waiting} processing={summary.processing} busyId={busyId} onOverride={override}/><CategoryBreakdown summary={summary} limits={limits}/><ProofPanel result={proof.result} checkedAt={proof.checkedAt}/></div>
+                <div className="column-stack"><ApprovalQueue waiting={summary.waiting} processing={summary.processing} busyId={busyId} onOverride={override} canApprove={canApprove}/><CategoryBreakdown summary={summary} limits={limits}/><ProofPanel result={proof.result} checkedAt={proof.checkedAt}/></div>
               </div>
             </>
           ) : view === 'demo' ? (

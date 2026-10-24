@@ -177,9 +177,17 @@ def test_the_request_chain_must_match_the_token(conn):
 
 # --- Over HTTP -----------------------------------------------------------------------
 
+AGENT_API_TOKEN = "agent-api-" + "a" * 40
+ROLE_TOKENS = {
+    "agent": AGENT_API_TOKEN,
+    "viewer": "viewer-" + "v" * 40,
+    "approver": "approver-" + "p" * 40,
+}
+
+
 @pytest.fixture
 def server(tmp_path):
-    srv = api.make_server(str(tmp_path / "ledger.db"), "dash-token", port=0,
+    srv = api.make_server(str(tmp_path / "ledger.db"), port=0, role_tokens=ROLE_TOKENS,
                           token_key=KEY, require_token=True)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{srv.server_address[1]}"
@@ -189,7 +197,8 @@ def server(tmp_path):
 
 def post(base, body):
     req = urllib.request.Request(base + "/authorize", json.dumps(body).encode(),
-                                 {"Content-Type": "application/json"})
+                                 {"Content-Type": "application/json",
+                                  "Authorization": f"Bearer {AGENT_API_TOKEN}"})
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return r.status, json.loads(r.read())

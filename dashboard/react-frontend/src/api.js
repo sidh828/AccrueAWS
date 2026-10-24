@@ -28,17 +28,22 @@ function getDashboardToken() {
 }
 
 const dashboardToken = getDashboardToken();
+const authHeaders = () => dashboardToken
+  ? { Authorization: `Bearer ${dashboardToken}` }
+  : {};
 
 async function getSnapshot() {
-  const response = await fetch(`${API}/events?since=0`, { cache: 'no-store' });
+  const response = await fetch(`${API}/events?since=0`, {
+    cache: 'no-store',
+    headers: authHeaders(),
+  });
   if (!response.ok) throw new Error(`Couldn't load activity (HTTP ${response.status})`);
   const rows = await response.json();
   if (!Array.isArray(rows)) throw new Error('Unexpected /events response');
   return rows;
 }
 
-// Full snapshots are important: /events?since=lastId does not expose updates to older IDs.
-// /stream sends changed rows, including an override that changes an old ID.
+// Full snapshots expose updates to older IDs, such as a decision resolving a hold.
 export function useGuardEvents() {
   const [rowsById, setRowsById] = useState({});
   const [connection, setConnection] = useState('connecting');
@@ -46,6 +51,7 @@ export function useGuardEvents() {
   const [busyId, setBusyId] = useState(null);
   const [demoBusy, setDemoBusy] = useState(null);
   const [limits, setLimits] = useState(null); // GET /limits; null until it answers
+  const [role, setRole] = useState(null);
   const alive = useRef(true);
 
   const mergeEvent = useCallback((event) => {
@@ -64,7 +70,6 @@ export function useGuardEvents() {
 
   useEffect(() => {
     alive.current = true;
-    let source = null;
     let pollingTimer = null;
     let pollBusy = false;
     let disposed = false;
@@ -82,47 +87,48 @@ export function useGuardEvents() {
       }
     }
 
-    function beginPolling() {
-      if (pollingTimer || disposed) return;
-      if (source) source.close();
+    async function start() {
+      try {
+        const identityResponse = await fetch(`${API}/whoami`, {
+          cache: 'no-store',
+          headers: authHeaders(),
+        });
+        let currentRole;
+        if (identityResponse.status === 404) {
+          currentRole = dashboardToken ? 'approver' : 'viewer';
+        } else {
+          if (!identityResponse.ok) {
+            throw new Error(`Dashboard access denied (HTTP ${identityResponse.status})`);
+          }
+          currentRole = (await identityResponse.json()).role;
+        }
+        if (!disposed) setRole(currentRole);
+        await pollOnce();
+      } catch (reason) {
+        if (!disposed) {
+          setError(reason.message || 'Dashboard access failed');
+          setConnection('offline');
+        }
+      }
+      if (disposed) return;
       setConnection('polling');
-      pollOnce();
       pollingTimer = window.setInterval(pollOnce, 1800);
     }
 
-    async function start() {
-      try {
-        await refresh();
-      } catch {
-        if (!disposed) setConnection('offline');
-      }
-      if (disposed) return;
-
-      // EventSource is a one-way read connection; approve/deny uses POST.
-      // Fail over after the first SSE error, including a missing /stream endpoint.
-      source = new EventSource(`${API}/stream`);
-      source.onopen = () => { if (!disposed) setConnection('live'); };
-      source.onmessage = (message) => {
-        try { mergeEvent(JSON.parse(message.data)); } catch { /* Ignore invalid messages */ }
-      };
-      source.onerror = () => beginPolling();
-    }
-
     start();
-    fetch(`${API}/limits`, { cache: 'no-store' })
+    fetch(`${API}/limits`, { cache: 'no-store', headers: authHeaders() })
       .then((response) => (response.ok ? response.json() : null))
       .then((body) => { if (!disposed && body) setLimits(body); })
       .catch(() => { /* keep the fallback limits */ });
     return () => {
       disposed = true;
       alive.current = false;
-      if (source) source.close();
       if (pollingTimer) window.clearInterval(pollingTimer);
     };
-  }, [refresh, mergeEvent]);
+  }, [refresh]);
 
   async function override(event, action) {
-    if (event.status !== 'held' || busyId !== null) return;
+    if (!['approver', 'admin'].includes(role) || event.status !== 'held' || busyId !== null) return;
     setBusyId(event.event_id);
     setError('');
     try {
@@ -162,7 +168,7 @@ export function useGuardEvents() {
   }
   
   async function runDemo(scenario) {
-    if (!dashboardToken) {
+    if (!['approver', 'admin'].includes(role)) {
       setError('Dashboard authorization is required to run simulations.');
       return false;
     }
@@ -197,7 +203,9 @@ export function useGuardEvents() {
   }
 
   const events = Object.values(rowsById).sort((a, b) => a.event_id - b.event_id);
-  return {events, connection, error, busyId, override, runDemo, demoBusy,canRunDemo: Boolean(dashboardToken), limits };
+  const canApprove = ['approver', 'admin'].includes(role);
+  return {events, connection, error, busyId, override, runDemo, demoBusy,
+    canApprove, canRunDemo: canApprove, limits };
 }
 
 const ANCHOR_KEY = 'accrue_record_anchor';
@@ -221,7 +229,10 @@ export function useVerify(activityKey) {
         ? `?anchor_id=${anchor.event_id}&anchor_hash=${encodeURIComponent(anchor.row_hash)}`
         : '';
       try {
-        const response = await fetch(`${API}/verify${query}`, { cache: 'no-store' });
+        const response = await fetch(`${API}/verify${query}`, {
+          cache: 'no-store',
+          headers: authHeaders(),
+        });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const body = await response.json();
         if (disposed) return;

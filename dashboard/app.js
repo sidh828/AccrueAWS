@@ -1,6 +1,6 @@
 // Mom's spending dashboard, plain version: the designer's frames go on top.
-// Speaks the API in CLAUDE.md: live rows from GET /stream, falling back to
-// polling GET /events?since=<id>, and POST /override for Approve/Deny.
+// Speaks the API in CLAUDE.md: polls GET /events?since=<id> with a role token
+// and POSTs approvals or denials with the approver credential.
 //
 // The API is same-origin by default. Add ?api=http://host:port to the page
 // URL to use another server (it must allow CORS).
@@ -36,6 +36,7 @@ let lastId = 0;
 let liveText = "Connecting…";
 let broken = false; // the last redraw threw
 let drawQueued = false;
+let canAct = false;
 
 // Approving needs the dashboard's token. The server prints a link ending in
 // #token=...; opening it once on a device lets that device approve. The
@@ -64,6 +65,7 @@ function takeToken() {
 
 function forgetToken() {
   token = null;
+  canAct = false;
   try {
     localStorage.removeItem(TOKEN_KEY);
   } catch {}
@@ -72,20 +74,30 @@ function forgetToken() {
 // ---- data ---------------------------------------------------------------
 
 function connect() {
-  const stream = new EventSource(`${API}/stream`);
-  stream.onopen = () => setLive("Live");
-  stream.onmessage = (e) => upsert([JSON.parse(e.data)]);
-  stream.onerror = () => {
-    // CLOSED means the server has no /stream (yet): poll /events instead.
-    // Otherwise the browser is already reconnecting by itself.
-    if (stream.readyState === EventSource.CLOSED) poll();
-    else setLive("Reconnecting…");
-  };
+  const headers = token ? { Authorization: `Bearer ${token}` } : {};
+  fetch(`${API}/whoami`, { headers, cache: "no-store" })
+    .then(async (response) => {
+      if (response.ok) {
+        const identity = await response.json();
+        canAct = identity.role === "approver" || identity.role === "admin";
+      } else if (response.status === 404) {
+        canAct = Boolean(token);
+      } else {
+        canAct = false;
+      }
+      draw();
+      poll();
+    })
+    .catch(() => {
+      canAct = false;
+      poll();
+    });
 }
 
 async function poll() {
   try {
-    const res = await fetch(`${API}/events?since=${lastId}`);
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+    const res = await fetch(`${API}/events?since=${lastId}`, { headers });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     upsert(await res.json());
     setLive("Live (checking every second)");
@@ -252,7 +264,6 @@ function renderBar(segments) {
 function renderNeedsOk(waiting) {
   const ids = new Set(waiting.map((r) => r.event_id));
   for (const id of cards.keys()) if (!ids.has(id)) cards.delete(id);
-  const canAct = Boolean(token);
   const nodes = waiting.map((r) => {
     const isBusy = busy.has(r.event_id);
     const card = cards.get(r.event_id);

@@ -12,7 +12,7 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: Object.fromEntries(
-      ['/events', '/stream', '/override', '/verify', '/limits', '/replay', '/demo'].map((path) => [path, target]),
+      ['/whoami', '/events', '/stream', '/override', '/verify', '/limits', '/replay', '/demo'].map((path) => [path, target]),
     ),
   },
 });

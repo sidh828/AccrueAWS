@@ -40,7 +40,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m guard.main
 
 # the live guard API (agent tools call /authorize, /inbound and /outbound;
-# the dashboard reads /events and /stream and approves through /override).
+# the dashboard reads /events and approves through /override).
 # It prints the dashboard links. The agent should classify pay_bill as utility
 # or rent so the known-bill rule applies; plain "bill" is a general payment.
 # Keys, generated once and kept stable and
@@ -48,7 +48,14 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 #   ACCRUE_WALL_KEY     keys the walls' stored code digests (32+ bytes); without
 #                       it, taint and received codes are forgotten on restart
 #   ACCRUE_LEDGER_KEY   keys the ledger's hash chain
-#   ACCRUE_DASHBOARD_TOKEN  the dashboard's secret for approving (else made up)
+#   ACCRUE_AGENT_TOKEN  calls /authorize, /inbound and /outbound
+#   ACCRUE_VIEWER_TOKEN reads dashboard and API data
+#   ACCRUE_APPROVER_TOKEN reads data and approves via /override
+#   ACCRUE_ADMIN_TOKEN  optional credential for all data routes
+# Credentials must be unique and at least 32 characters.
+# ACCRUE_DASHBOARD_TOKEN remains a temporary alias for ACCRUE_APPROVER_TOKEN.
+# The API uses plain HTTP: keep it on loopback/a trusted private network or
+# place it behind TLS before exposing it to other networks.
 #   ACCRUE_ALLOWED_CONTACTS comma-separated recipients /outbound always allows
 #   ACCRUE_TOKEN_KEY    verifies agents' signed delegation tokens; with
 #   ACCRUE_REQUIRE_TOKENS=1 a request without a valid token is refused.
@@ -56,8 +63,10 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 #                              --person mom --agent bills-agent --day 50000
 #   A sub-agent narrows it (no key needed): python3 -m guard.tokens narrow TOKEN \
 #                              --agent giftcard-subagent --day 10000 --tools buy_gift_card
-# Generate a key with: python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+# Generate each credential with: python3 -c "import secrets; print(secrets.token_urlsafe(48))"
 .venv/bin/python -m guard.api --db ledger.db
+# Startup prints separate dashboard links for approvers and viewers. The
+# dashboard sends credentials in Authorization headers, not URL query strings.
 # Password-vault entries are still in memory and must be loaded at startup.
 
 # optional stand-in dashboard/API for a demo without the real guard:

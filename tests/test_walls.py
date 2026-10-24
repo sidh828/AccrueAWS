@@ -6,6 +6,13 @@ from guard import api
 from walls.secrets import SecretStore, aba_valid, luhn_valid
 from walls.inbound import wrap_untrusted
 
+AGENT_TOKEN = "agent-" + "a" * 40
+ROLE_TOKENS = {
+    "agent": AGENT_TOKEN,
+    "viewer": "viewer-" + "v" * 40,
+    "approver": "approver-" + "p" * 40,
+}
+
 
 class Clock:
     def __init__(self): self.t = 1_000_000.0
@@ -25,13 +32,14 @@ def tools(g):
 @pytest.fixture
 def http_tools(tmp_path):
     server = api.make_server(
-        str(tmp_path / "http-ledger.db"), "test-token", port=0,
+        str(tmp_path / "http-ledger.db"), port=0, role_tokens=ROLE_TOKENS,
         wall_key=b"wall-http-test-key-" * 2,
         contacts={"daughter@example.com"},
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    guard = HttpGuard(f"http://127.0.0.1:{server.server_address[1]}", timeout=2)
+    guard = HttpGuard(f"http://127.0.0.1:{server.server_address[1]}", timeout=2,
+                      token=AGENT_TOKEN)
     try:
         yield ToolBox(guard, session_id="http-session")
     finally:
