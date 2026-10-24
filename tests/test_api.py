@@ -506,3 +506,30 @@ def test_the_demo_is_decided_by_the_real_guard(tmp_path, monkeypatch):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_payment_history_requires_a_viewer_role(guard):
+    """Payment history and verification data require a dashboard read role.
+    Credentials in query parameters never authorize a request."""
+    known_payee(guard)
+    for token in ["", "wrong", VIEWER_TOKEN.upper()]:
+        assert call(guard, "GET", "/events", token=token)[0] == 401
+    status, rows = call(guard, "GET", "/events")
+    assert status == 200 and rows
+
+    host, port = guard["base"].removeprefix("http://").split(":")
+    for path, headers, expected in [
+        ("/stream", {}, 401),
+        ("/stream?token=wrong", {}, 401),
+        ("/stream?token=" + VIEWER_TOKEN, {}, 401),
+        ("/stream", {"Authorization": f"Bearer {VIEWER_TOKEN}"}, 200),
+    ]:
+        conn = http.client.HTTPConnection(host, int(port), timeout=10)
+        conn.request("GET", path, headers=headers)
+        assert conn.getresponse().status == expected, path
+        conn.close()
+
+    assert call(guard, "GET", "/verify", token="")[0] == 401
+    assert call(guard, "GET", "/limits", token="")[0] == 401
+    assert call(guard, "GET", "/verify", token=VIEWER_TOKEN)[0] == 200
+    assert call(guard, "GET", "/limits", token=VIEWER_TOKEN)[0] == 200

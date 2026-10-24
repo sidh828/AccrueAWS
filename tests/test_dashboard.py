@@ -48,8 +48,9 @@ def api(played):
     return played[1]
 
 
-def get(url):
-    with urllib.request.urlopen(url) as res:
+def get(url, token=TOKEN):
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers)) as res:
         return json.load(res)
 
 
@@ -121,7 +122,7 @@ def test_override_settles_a_held_payment_once(api):
 
 def test_stream_resumes_after_last_event_id_and_sends_changes_without_an_id(played):
     guard, url = played
-    request = urllib.request.Request(f"{url}/stream", headers={"Last-Event-ID": "5"})
+    request = urllib.request.Request(f"{url}/stream?token={TOKEN}", headers={"Last-Event-ID": "5"})
     with urllib.request.urlopen(request, timeout=5) as res:
         assert [e["id"] for e in read_events(res, 2)] == ["6", "7"]
         guard.override(6, "approve")
@@ -133,7 +134,7 @@ def test_stream_resumes_after_last_event_id_and_sends_changes_without_an_id(play
 
 def test_a_malformed_last_event_id_replays_from_the_start(api):
     # "²" passes str.isdigit() but int() rejects it.
-    request = urllib.request.Request(f"{api}/stream", headers={"Last-Event-ID": "²"})
+    request = urllib.request.Request(f"{api}/stream?token={TOKEN}", headers={"Last-Event-ID": "²"})
     with urllib.request.urlopen(request, timeout=5) as res:
         assert read_events(res, 1)[0]["id"] == "1"
 
@@ -196,10 +197,10 @@ def test_an_oversized_override_body_is_refused_unread(api):
 
 def test_live_streams_are_capped():
     with serve(fake_api.FakeGuard(), max_streams=1) as url:
-        with urllib.request.urlopen(f"{url}/stream", timeout=5) as first:
+        with urllib.request.urlopen(f"{url}/stream?token={TOKEN}", timeout=5) as first:
             first.readline()  # the first stream is open and holds the only slot
             with pytest.raises(urllib.error.HTTPError) as err:
-                urllib.request.urlopen(f"{url}/stream", timeout=5)
+                urllib.request.urlopen(f"{url}/stream?token={TOKEN}", timeout=5)
             assert err.value.code == 503
             err.value.close()
 
@@ -236,7 +237,7 @@ def test_a_failed_push_is_kept_and_retried_with_backoff():
                 sent.append(alert)
             return up[0]
 
-        watcher = alerts.Watcher(url, deliver)
+        watcher = alerts.Watcher(url, token=TOKEN, deliver=deliver)
         watcher.step(now=0)              # first read: nothing yet
         guard.add(*fake_api.SCRIPT[0])   # allowed: no alert
         guard.add(*GIFT_CARD_STOPPED)
@@ -253,7 +254,7 @@ def test_a_flood_goes_out_as_one_summary():
     guard = fake_api.FakeGuard()
     with serve(guard) as url:
         sent = []
-        watcher = alerts.Watcher(url, lambda alert: sent.append(alert) or True)
+        watcher = alerts.Watcher(url, token=TOKEN, deliver=lambda alert: sent.append(alert) or True)
         watcher.step(now=0)
         for _ in range(10):
             guard.add(*GIFT_CARD_STOPPED)
@@ -267,7 +268,7 @@ def test_a_flood_goes_out_as_one_summary():
 def test_starting_late_still_alerts_on_payments_waiting(played):
     guard, url = played
     sent = []
-    alerts.Watcher(url, lambda alert: sent.append(alert) or True).step(now=0)
+    alerts.Watcher(url, token=TOKEN, deliver=lambda alert: sent.append(alert) or True).step(now=0)
     # The three stopped ones happened before we were watching; the two held
     # ones still need an answer.
     assert [a["title"] for a in sent] == ["Needs your OK", "Needs your OK"]
@@ -275,7 +276,7 @@ def test_starting_late_still_alerts_on_payments_waiting(played):
 
 def test_a_row_it_cannot_read_is_skipped_not_fatal(monkeypatch, capsys):
     sent = []
-    watcher = alerts.Watcher("http://unused", lambda alert: sent.append(alert) or True, replay=True)
+    watcher = alerts.Watcher("http://unused", deliver=lambda alert: sent.append(alert) or True, replay=True)
     good = {"event_id": 3, "status": "released", "tool": "buy_gift_card",
             "amount_cents": 45000, "payee": "giftcards.example", "rule": "gift_card_daily_cap"}
     rows = [{"no": "event_id"}, "not a row", {"event_id": 7.0, "status": "held"}, good]
@@ -290,3 +291,24 @@ def test_alerts_refuse_a_link_that_can_approve():
     # Alerts go through ntfy.sh, readable by anyone who knows the topic.
     with pytest.raises(SystemExit):
         alerts.main(["--dry-run", "--open", f"http://127.0.0.1:8001/#token={TOKEN}"])
+
+
+def test_payment_history_needs_the_token_on_the_stand_in_too(api):
+    for token in [None, "wrong"]:
+        with pytest.raises(urllib.error.HTTPError) as err:
+            get(f"{api}/events?since=0", token=token)
+        assert err.value.code == 401
+        err.value.close()
+        with pytest.raises(urllib.error.HTTPError) as err:
+            urllib.request.urlopen(f"{api}/stream" + (f"?token={token}" if token else ""), timeout=5)
+        assert err.value.code == 401
+        err.value.close()
+    assert get(f"{api}/events?since=0")  # with the dashboard's token
+
+
+def test_a_watcher_without_the_token_reads_nothing(played, capsys):
+    _, url = played
+    sent = []
+    alerts.Watcher(url, deliver=lambda alert: sent.append(alert) or True, replay=True).step(now=0)
+    assert sent == []
+    assert "401" in capsys.readouterr().out

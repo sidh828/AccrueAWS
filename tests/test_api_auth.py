@@ -55,6 +55,7 @@ def request(base, method, path, role_token=None, body=None):
 def test_data_routes_require_valid_credentials(server):
     assert request(server, "GET", "/events")[0] == 401
     assert request(server, "GET", "/events", "incorrect")[0] == 401
+    assert request(server, "GET", "/stream?token=" + VIEWER_TOKEN)[0] == 401
     assert request(server, "POST", "/inbound", body={})[0] == 401
     assert request(server, "POST", "/inbound", "incorrect", {})[0] == 401
 

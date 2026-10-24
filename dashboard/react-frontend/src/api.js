@@ -32,11 +32,15 @@ const authHeaders = () => dashboardToken
   ? { Authorization: `Bearer ${dashboardToken}` }
   : {};
 
+// Payment history is only the dashboard's to read, so reads carry its token.
+const NEEDS_LINK = "This screen can't show payments. Open the dashboard using its authorized link.";
+
 async function getSnapshot() {
   const response = await fetch(`${API}/events?since=0`, {
     cache: 'no-store',
     headers: authHeaders(),
   });
+  if (response.status === 401) throw new Error(NEEDS_LINK);
   if (!response.ok) throw new Error(`Couldn't load activity (HTTP ${response.status})`);
   const rows = await response.json();
   if (!Array.isArray(rows)) throw new Error('Unexpected /events response');
@@ -80,8 +84,11 @@ export function useGuardEvents() {
       try {
         await refresh();
         if (!disposed) setConnection('polling');
-      } catch {
-        if (!disposed) setConnection('offline');
+      } catch (reason) {
+        if (!disposed) {
+          setConnection('offline');
+          if (reason.message === NEEDS_LINK) setError(NEEDS_LINK);
+        }
       } finally {
         pollBusy = false;
       }

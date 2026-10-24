@@ -8,8 +8,8 @@ ledger and Cedar.
     POST /override           approver -> guard: {event_id, action: approve|deny}
     POST /replay             approver -> guard: {policy, since?} -> what a draft rule
                              would have changed (guard/replay.py)
-    GET  /events?since=<id>  payments, oldest first
-    GET  /stream             the same, live, as server-sent events
+    GET  /events?since=<id>  payments, oldest first (viewer/approver credential)
+    GET  /stream             the same, live (viewer/approver credential)
     GET  /verify             {ok, first_bad_event_id, first_bad_override_id, head}
                              (?anchor_id=&anchor_hash= checks a head kept elsewhere)
     GET  /limits             the spending limits, normal and after a scam flag
