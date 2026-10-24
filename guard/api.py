@@ -2,6 +2,8 @@
 ledger and Cedar.
 
     POST /authorize          agent -> guard: may this payment happen?
+    POST /inbound            agent -> walls: {session_id, source, content}
+    POST /outbound           agent -> walls: {session_id, recipient, channel, content}
     POST /override           dashboard only: {event_id, action: approve|deny}
     GET  /events?since=<id>  payments, oldest first
     GET  /stream             the same, live, as server-sent events
@@ -31,10 +33,13 @@ Fail closed: a request the guard can't answer because the database failed
 gets a 503 whose body is a hold, never an allow. The agent's tools must
 treat any error or timeout from here as "not paid" too.
 
-Taint can only tighten. A request's "tainted": true is honored; "false" is
-ignored. If a session store is wired in (walls.inbound.SessionStore, or
-anything with is_tainted(session_id)), a tainted session is tainted no
-matter what the request says.
+Benji's walls (walls/) run inside the same server: /inbound tags where
+text came from and taints the session for untrusted sources, /outbound
+blocks codes Mom received and other secrets, and their state is kept in
+the ledger's database (walls.storage) so it survives a restart. Taint can
+only tighten: /authorize uses the stricter column whenever /inbound has
+tainted the session, and a request's own "tainted": true is honored while
+"false" is ignored.
 
 Standard library only (http.server), like the stand-in.
 """
@@ -49,6 +54,11 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+from walls.inbound import InboundWall, SessionStore
+from walls.outbound import OutboundWall
+from walls.secrets import SecretStore
+from walls.storage import WallStateStore
 
 from . import authorize, ledger
 
@@ -117,7 +127,9 @@ class Handler(BaseHTTPRequestHandler):
     # Set by make_server.
     db_path = None
     token = None
-    sessions = None  # anything with is_tainted(session_id), or None
+    sessions = None  # walls.inbound.SessionStore: taint, shared with /inbound
+    inbound_wall = None
+    outbound_wall = None
     streams = None  # a semaphore capping live /stream connections
     changed = None  # a Condition notified after every write, to wake streams
     timeout = TIMEOUT
@@ -161,7 +173,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/authorize", "/override"):
+        if path not in ("/authorize", "/override", "/inbound", "/outbound"):
             return self._json(404, {"error": "not found"})
         # JSON only: a web page can send a text/plain POST anywhere without
         # asking first. A JSON body makes the browser ask (CORS) first.
@@ -174,6 +186,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/authorize":
             return self._authorize(body)
+        if path == "/inbound":
+            return self._inbound(body)
+        if path == "/outbound":
+            return self._outbound(body)
         return self._override(body)
 
     def _authorize(self, body):
@@ -182,9 +198,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": f"missing {', '.join(missing)}"})
         kwargs = {f: body[f] for f in REQUIRED + OPTIONAL if f in body}
         session_id = body["session_id"]
-        kwargs["tainted"] = body.get("tainted") is True or bool(
-            self.sessions is not None and isinstance(session_id, str)
-            and self.sessions.is_tainted(session_id)
+        kwargs["tainted"] = body.get("tainted") is True or (
+            isinstance(session_id, str) and self.sessions.is_tainted(session_id)
         )
         try:
             with self._ledger() as conn:
@@ -197,6 +212,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(503, {**UNAVAILABLE, "error": f"the guard failed: {err!r}"})
         self._wake_streams()
         self._json(200, response)
+
+    def _inbound(self, body):
+        if not _strings(body, "session_id", "source", "content") or not body["session_id"]:
+            return self._json(400, {"error": "expected {session_id, source, content} as strings"})
+        result = self.inbound_wall.ingest(body["session_id"], body["source"], body["content"])
+        self._json(200, result.to_contract())
+
+    def _outbound(self, body):
+        if (not _strings(body, "session_id", "recipient", "channel", "content")
+                or not body["session_id"] or not body["recipient"]):
+            return self._json(400, {"error": "expected {session_id, recipient, channel, "
+                                             "content} as strings"})
+        self._json(200, self.outbound_wall.check(body["session_id"], body["recipient"],
+                                                 body["channel"], body["content"]))
 
     def _override(self, body):
         event_id, action = body.get("event_id"), body.get("action")
@@ -303,6 +332,10 @@ class Handler(BaseHTTPRequestHandler):
         pass  # keep the terminal quiet
 
 
+def _strings(body, *fields):
+    return all(isinstance(body.get(f), str) for f in fields)
+
+
 class _Connection:
     def __init__(self, db_path):
         self.db_path = db_path
@@ -315,12 +348,21 @@ class _Connection:
         self.conn.close()
 
 
-def make_server(db_path, token, host="127.0.0.1", port=8000, sessions=None,
-                max_streams=MAX_STREAMS):
+def make_server(db_path, token, host="127.0.0.1", port=8000, wall_key=None,
+                contacts=None, max_streams=MAX_STREAMS):
     """A server for the ledger at `db_path`. `token` is the dashboard's
-    secret for /override; `sessions` is the taint store, if any."""
+    secret for /override. `wall_key` (32+ bytes) keys the walls' stored
+    digests of received codes; with it, taint and received codes are kept
+    in the database and survive a restart, without it they live in memory.
+    `contacts` are the recipients /outbound always allows."""
     if not token:
         raise ValueError("the dashboard token can't be empty")
+    storage = None
+    if wall_key is not None:
+        key = wall_key.encode() if isinstance(wall_key, str) else wall_key
+        storage = WallStateStore(db_path, key)  # raises if the key is short
+    sessions = SessionStore(storage=storage)
+    secrets_store = SecretStore(storage=storage)
     conn = ledger.connect(db_path)
     if db_path != ":memory:":
         # Readers (the dashboard, /verify) don't wait for writers, or the
@@ -329,6 +371,8 @@ def make_server(db_path, token, host="127.0.0.1", port=8000, sessions=None,
     conn.close()
     handler = type("BoundHandler", (Handler,), {
         "db_path": db_path, "token": token, "sessions": sessions,
+        "inbound_wall": InboundWall(sessions, secrets_store),
+        "outbound_wall": OutboundWall(secrets_store, sessions, contacts=contacts or set()),
         "streams": threading.BoundedSemaphore(max_streams),
         "changed": threading.Condition(),
     })
@@ -343,13 +387,20 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     token = os.environ.get("ACCRUE_DASHBOARD_TOKEN") or secrets.token_urlsafe(24)
-    server = make_server(args.db, token, args.host, args.port)
+    wall_key = os.environ.get("ACCRUE_WALL_KEY")
+    contacts = {c.strip() for c in os.environ.get("ACCRUE_ALLOWED_CONTACTS", "").split(",")
+                if c.strip()}
+    server = make_server(args.db, token, args.host, args.port, wall_key=wall_key,
+                         contacts=contacts)
     base = f"http://{args.host}:{args.port}/"
     print(f"guard API on {base}  (ledger: {args.db})")
     print(f"dashboard, can approve:  {base}#token={token}")
     print(f"dashboard, read-only:    {base}")
     if not os.environ.get("ACCRUE_LEDGER_KEY"):
         print("note: ACCRUE_LEDGER_KEY isn't set, so the ledger is hashed without a key")
+    if not wall_key:
+        print("note: ACCRUE_WALL_KEY isn't set, so taint and received codes are kept in "
+              "memory and forgotten on restart")
     print("(open the first link once on each device that should approve; Ctrl-C to stop)",
           flush=True)
     try:

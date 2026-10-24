@@ -26,11 +26,16 @@ def conn():
     return ledger.connect(":memory:")
 
 
+# The tool each kind of payment goes through (authorize.TOOL_CATEGORIES).
+TOOLS = {"gift_card": "buy_gift_card", "transfer": "send_zelle", "crypto": "send_crypto"}
+
+
 def pay(conn, amount, payee="grocer.example", category="groceries", tainted=False,
         chain=BILLS, **kwargs):
     return authorize.authorize_payment(
-        conn, person="mom", chain=list(chain), tool="pay_bill", amount_cents=amount,
-        payee=payee, category=category, session_id="sess-1", tainted=tainted, **kwargs,
+        conn, person="mom", chain=list(chain), tool=TOOLS.get(category.lower(), "pay_bill"),
+        amount_cents=amount, payee=payee, category=category, session_id="sess-1",
+        tainted=tainted, **kwargs,
     )
 
 
@@ -143,6 +148,19 @@ def test_known_bills_can_rise_20_percent_and_are_exempt_from_the_daily_cap(conn)
     assert response["totals"]["day"] == 0
     paid_before(conn, "grocer.example")
     assert outcome(pay(conn, 8_000)) == ("allow", None)
+
+
+def test_the_tool_decides_which_categories_it_can_pay(conn):
+    """The agent sends the category, so it can't be what decides which
+    limits apply: "pay_bill" labelled "gift_card" (or "groceries" for a
+    gift card) would dodge the gift card cap. Nothing is logged."""
+    for tool, category in [("pay_bill", "gift_card"), ("buy_gift_card", "groceries"),
+                           ("send_zelle", "utility"), ("teleport", "transfer")]:
+        with pytest.raises(ValueError, match="tool|category"):
+            authorize.authorize_payment(
+                conn, person="mom", chain=BILLS, tool=tool, amount_cents=100,
+                payee="x.example", category=category, session_id="s")
+    assert ledger.contract_rows(conn) == []
 
 
 def test_a_new_payee_calling_itself_a_utility_is_not_a_known_bill(conn):

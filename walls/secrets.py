@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from walls.normalize import digit_runs, digit_stream, nfkc
+from walls.storage import WallStateStore
 
 CODE_WINDOW_SECONDS = 3600  # remember received codes for one hour
 
@@ -73,17 +74,29 @@ def extract_codes(text: str) -> list[str]:
 
 
 class SecretStore:
-    """Holds received codes (1 hour) and password-vault values (in memory only)."""
+    """Checks received codes and vault values; persistent codes are stored as keyed digests."""
 
-    def __init__(self, clock: Callable[[], float] = time.time, window: int = CODE_WINDOW_SECONDS):
+    def __init__(
+        self,
+        clock: Callable[[], float] = time.time,
+        window: int = CODE_WINDOW_SECONDS,
+        storage: WallStateStore | None = None,
+    ):
         self._clock = clock
         self._window = window
+        self._storage = storage
         self._codes: dict[str, float] = {}
         self._vault: dict[str, str] = {}
         self._lock = threading.Lock()
 
+    def now(self) -> float:
+        return self._clock()
+
     # ---- registration -------------------------------------------------
     def record_code(self, code: str) -> None:
+        if self._storage:
+            self._storage.record_code(code, self._clock())
+            return
         with self._lock:
             self._codes[code] = self._clock()
 
@@ -95,6 +108,8 @@ class SecretStore:
 
     def active_codes(self) -> list[str]:
         now = self._clock()
+        if self._storage:
+            return []
         with self._lock:
             self._codes = {c: t for c, t in self._codes.items() if now - t < self._window}
             return list(self._codes)
@@ -122,6 +137,8 @@ class SecretStore:
                 out += [Finding("received_code", m.start(), m.end()) for m in hits]
             elif code in stream:
                 out.append(Finding("received_code", 0, len(text), label="obfuscated"))
+        if self._storage and self._storage.matches_active_code(stream, self._clock(), self._window):
+            out.append(Finding("received_code", 0, len(text), label="obfuscated"))
         return out
 
     def _scan_vault(self, text: str) -> list[Finding]:

@@ -339,6 +339,20 @@ RULE_OUTCOMES = {
 # Cedar failed, crashed or timed out. Fail closed: the payment waits.
 GUARD_UNAVAILABLE = "guard_unavailable"
 
+# Which categories each tool can pay. The agent sends the category, so it
+# can't be trusted on its own: "pay_bill" labelled "groceries" must not be
+# a way to buy gift cards past their cap. The tool is what the guard
+# actually does with the money, so it decides. "bill" is accepted for a
+# bill of unknown kind, but only "utility" and "rent" can be known bills.
+TOOL_CATEGORIES = {
+    "pay_bill": {"bill", "utility", "rent", "insurance", "groceries", "pharmacy",
+                 "medical", "home_repair", "donation", "subscription", "personal"},
+    "buy_gift_card": {"gift_card"},
+    "send_zelle": {"transfer"},
+    "send_wire": {"transfer"},
+    "send_crypto": {"crypto"},
+}
+
 BREAKER_WINDOW = timedelta(minutes=10)
 KNOWN_BILL_CATEGORIES = {"utility", "rent"}
 KNOWN_BILL_LOOKBACK = timedelta(days=45)
@@ -450,6 +464,10 @@ def authorize_payment(conn, *, person, chain, tool, amount_cents, payee, categor
     payee = _clean_name("payee", payee)
     category = _clean_name("category", category)
     tool = _clean_name("tool", tool)
+    if tool not in TOOL_CATEGORIES:
+        raise ValueError(f"unknown tool {tool!r}")
+    if category not in TOOL_CATEGORIES[tool]:
+        raise ValueError(f"{tool} can't pay category {category!r}")
     _entity_uid("session_id", session_id)
     scope_id = "/".join(chain)
 
