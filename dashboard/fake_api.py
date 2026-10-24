@@ -15,7 +15,8 @@ command runs both:
     python3 dashboard/fake_api.py --host 0.0.0.0   # reachable from a phone
 
 Nothing here is real: no Cedar, no money, and the hashes chain only
-within this process.
+within this process. /override has no login, so anything that can reach
+the port can approve; the real guard needs one.
 """
 
 import argparse
@@ -34,6 +35,9 @@ STATIC = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
 }
+MAX_BODY = 10_000  # bytes; an /override body is about 40
+MAX_STREAMS = 50  # live /stream connections at once
+TIMEOUT = 30  # seconds before a stalled connection is dropped
 
 BILLS = ["mom", "bills-agent"]
 SUBAGENT = ["mom", "bills-agent", "giftcard-subagent"]
@@ -66,16 +70,17 @@ class FakeGuard:
     """Event rows in memory, plus a feed of every row as it was added or
     changed, which /stream clients follow."""
 
-    def __init__(self):
+    def __init__(self, first_id=1):
         self.rows = {}
         self.feed = []
         self.cond = threading.Condition()
+        self._first_id = first_id
         self._prev_hash = "0" * 64
 
     def add(self, tool, amount_cents, payee, category, chain, decision, rule, explanation):
         with self.cond:
             row = {
-                "event_id": len(self.rows) + 1,
+                "event_id": self._first_id + len(self.rows),
                 "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "status": STATUS[decision], "person": chain[0], "chain": list(chain),
                 "tool": tool, "amount_cents": amount_cents, "payee": payee,
@@ -112,6 +117,8 @@ class FakeGuard:
 
 class Handler(BaseHTTPRequestHandler):
     guard = None  # a FakeGuard, set by make_server
+    streams = None  # a semaphore capping live /stream connections, set by make_server
+    timeout = TIMEOUT
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -137,7 +144,13 @@ class Handler(BaseHTTPRequestHandler):
         if urlparse(self.path).path != "/override":
             return self._json(404, {"error": "not found"})
         try:
-            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return self._json(400, {"error": "bad Content-Length"})
+        if not 0 <= length <= MAX_BODY:
+            return self._json(413, {"error": f"the body must be at most {MAX_BODY} bytes"})
+        try:
+            body = json.loads(self.rfile.read(length))
             event_id, action = body["event_id"], body["action"]
             if type(event_id) is not int or action not in ("approve", "deny"):
                 raise ValueError
@@ -151,17 +164,22 @@ class Handler(BaseHTTPRequestHandler):
             self._json(409, {"error": str(err)})
 
     def _stream(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self._cors()
-        self.end_headers()
-        last = self.headers.get("Last-Event-ID", "0")
-        last = int(last) if last.isdigit() else 0
-        guard = self.guard
-        with guard.cond:
-            pending, seen = guard.since(last), len(guard.feed)
+        # Parsed before any header goes out: "²" passes isdigit() but not int().
         try:
+            last = int(self.headers.get("Last-Event-ID") or 0)
+        except ValueError:
+            last = 0
+        if not self.streams.acquire(blocking=False):
+            return self._json(503, {"error": "too many live connections"})
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self._cors()
+            self.end_headers()
+            guard = self.guard
+            with guard.cond:
+                pending, seen = guard.since(last), len(guard.feed)
             while True:
                 for row in pending:
                     # An id line only for new rows: a changed old row must
@@ -176,8 +194,10 @@ class Handler(BaseHTTPRequestHandler):
                 with guard.cond:
                     guard.cond.wait_for(lambda: len(guard.feed) > seen, timeout=15)
                     pending, seen = guard.feed[seen:], len(guard.feed)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        except OSError:
+            pass  # the browser went away or stopped reading
+        finally:
+            self.streams.release()
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -199,8 +219,10 @@ class Handler(BaseHTTPRequestHandler):
         pass  # keep the terminal quiet
 
 
-def make_server(guard, host="127.0.0.1", port=8001):
-    handler = type("BoundHandler", (Handler,), {"guard": guard})
+def make_server(guard, host="127.0.0.1", port=8001, max_streams=MAX_STREAMS):
+    handler = type("BoundHandler", (Handler,), {
+        "guard": guard, "streams": threading.BoundedSemaphore(max_streams),
+    })
     return ThreadingHTTPServer((host, port), handler)
 
 
@@ -218,7 +240,10 @@ def main(argv=None):
                         help="seconds between scripted payments (default 3)")
     args = parser.parse_args(argv)
 
-    guard = FakeGuard()
+    # Ids start at the current time in milliseconds, so they keep rising
+    # across restarts: a dashboard or alert watcher left running doesn't
+    # sit waiting for ids it has already seen.
+    guard = FakeGuard(first_id=int(time.time() * 1000))
     server = make_server(guard, args.host, args.port)
     threading.Thread(target=play, args=(guard, args.step), daemon=True).start()
     print(f"dashboard on http://{args.host}:{args.port}/  (Ctrl-C to stop)")
