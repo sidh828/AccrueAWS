@@ -11,6 +11,11 @@ const API = new URLSearchParams(location.search).get("api") || "";
 // copy the normal column of the spending rules in CLAUDE.md.
 const LIMITS = { day: 50000, gift_card_day: 10000 };
 
+// The guard counts spending over a rolling 24 hours (BUDGET_WINDOW in
+// guard/authorize.py), so the running total here uses the same window.
+// A calendar day would disagree with it every night after midnight.
+const WINDOW_MS = 24 * 60 * 60 * 1000;
+
 // On screen, say "spending rules" and "running total", never "Cedar" or
 // "ledger". Keep RULES in sync with dashboard/alerts.py.
 const RULES = {
@@ -114,9 +119,17 @@ const who = (r) => (Array.isArray(r.chain) ? r.chain.slice(1).map(String).join("
 const state = (r) => (lookup(STATES, r.status) ? r.status : "unknown"); // safe as a class name
 const stateLabel = (r) => lookup(STATES, r.status) || "Unknown";
 
+// The last 24 hours reach into yesterday, so a bare "1:43 PM" could be
+// either day: anything not from today says which day it was.
 function time(r) {
   const when = new Date(r.ts);
-  return Number.isNaN(when.getTime()) ? "" : when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (Number.isNaN(when.getTime())) return "";
+  const clock = when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const day = new Date();
+  if (when.toDateString() === day.toDateString()) return clock;
+  day.setDate(day.getDate() - 1);
+  if (when.toDateString() === day.toDateString()) return `Yesterday ${clock}`;
+  return `${when.toLocaleDateString([], { weekday: "short" })} ${clock}`;
 }
 
 // Builds DOM with strings as text, never as HTML: payees and explanations
@@ -159,14 +172,14 @@ function draw() {
 }
 
 function render() {
-  const today = new Date().toDateString();
-  const isToday = (r) => new Date(r.ts).toDateString() === today;
+  const now = Date.now();
+  const recent = (r) => now - new Date(r.ts).getTime() < WINDOW_MS; // false for a bad ts
   const all = [...rows.values()].sort((a, b) => a.event_id - b.event_id);
-  const day = all.filter(isToday);
-  const allowed = day.filter((r) => r.status === "allowed");
-  const stopped = day.filter((r) => r.status === "released");
+  const last24 = all.filter(recent);
+  const allowed = last24.filter((r) => r.status === "allowed");
+  const stopped = last24.filter((r) => r.status === "released");
   // A held payment waits for the family however long that takes, so unlike
-  // the running total it isn't limited to today.
+  // the running total it isn't limited to the last 24 hours.
   const waiting = all.filter((r) => r.status === "held" || r.status === "pending");
 
   const banner = document.getElementById("banner");
@@ -174,15 +187,15 @@ function render() {
   banner.textContent = "Payments are paused after repeated blocked attempts. Nothing goes through until you OK it.";
 
   document.getElementById("headline").textContent =
-    `${money(total(allowed))} of ${money(LIMITS.day)} spent today`;
+    `${money(total(allowed))} of ${money(LIMITS.day)} spent in the last 24 hours`;
   document.getElementById("sub").textContent = stopped.length
     ? `Stopped ${stopped.length} ${stopped.length === 1 ? "payment" : "payments"} worth ${money(total(stopped))}`
-    : "Nothing stopped today";
+    : "Nothing stopped in the last 24 hours";
 
-  renderBar([...allowed, ...waiting.filter(isToday), ...stopped]);
+  renderBar([...allowed, ...waiting.filter(recent), ...stopped]);
   renderNeedsOk(waiting);
   renderMeters(allowed);
-  document.getElementById("timeline").replaceChildren(...day.reverse().map(timelineItem));
+  document.getElementById("timeline").replaceChildren(...last24.reverse().map(timelineItem));
 }
 
 // The hero: each payment is a segment building toward the daily limit.
@@ -190,7 +203,7 @@ function render() {
 function renderBar(segments) {
   const scale = Math.max(LIMITS.day, total(segments));
   const pct = (amount) => `${(100 * amount) / scale}%`;
-  const limit = el("div", { id: "limit" }, el("span", {}, `Today's limit ${money(LIMITS.day)}`));
+  const limit = el("div", { id: "limit" }, el("span", {}, `24-hour limit ${money(LIMITS.day)}`));
   limit.style.left = pct(LIMITS.day);
   const bars = segments.map((r) => {
     const seg = el("div", { className: `seg ${state(r)}`, title: `${what(r)}: ${stateLabel(r)}` });
