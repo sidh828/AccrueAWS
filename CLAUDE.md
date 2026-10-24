@@ -62,81 +62,120 @@ only tighten.
  "chain": ["mom", "bills-agent", "giftcard-subagent"],
  "tool": "buy_gift_card", "amount_cents": 45000,
  "payee": "giftcards.example", "category": "gift_card",
- "reason": "utility said power will be cut", "request_id": "uuid"}
+ "reason": "utility said power will be cut", "request_id": "uuid",
+ "session_id": "conversation-1"}
 ```
 
-Response:
+Response (`totals` include this request; `limits` are the column that applied):
 
 ```json
 {"decision": "deny", "rule": "gift_card_daily_cap",
- "totals": {"day": 90000, "gift_card_day": 90000},
- "limits": {"day": 50000, "gift_card_day": 10000},
- "needs_approval": true, "event_id": 42}
+ "totals": {"day": 62000, "gift_card_day": 50000, "recent_payees": 0},
+ "limits": {"day": 50000, "gift_card_day": 10000, "new_payee_first": 20000,
+            "recent_payees": 50000},
+ "needs_approval": false, "event_id": 42}
 ```
 
 **Event row** (from /events and /stream):
 
 ```json
-{"event_id": 42, "ts": "2026-10-24T14:02:11Z", "status": "released",
+{"event_id": 42, "ts": "2026-10-24T14:02:11.000000Z", "status": "released",
  "person": "mom", "chain": ["..."], "tool": "buy_gift_card",
  "amount_cents": 45000, "payee": "giftcards.example", "category": "gift_card",
  "decision": "deny", "rule": "gift_card_daily_cap", "explanation": "...",
- "flagged": true, "row_hash": "..."}
+ "flagged": true, "row_hash": "...", "notice": null, "known_bill": false,
+ "resolved_by": null}
 ```
 
-- `decision` is `allow`, `deny` or `hold`. `status` is `pending`, `allowed`,
-  `released` or `held`.
-- `token` is optional until tokens land; the guard then requires it and
-  ignores a bare chain.
-- `GET /events?since=<id>` and `GET /stream` (server-sent events): rows
-  ordered by `event_id`.
-- `POST /override {event_id, action: approve|deny}`: dashboard only. The
-  agent has no tool for it, and no credential: the request needs
+- `decision` is `allow`, `deny` or `hold`, and `needs_approval` is true exactly
+  when it's `hold`. `status` is `allowed`, `released` or `held`. There's no
+  `pending` row: the decision happens inside one locked transaction.
+- **Approvals are new rows; nothing is ever edited.** On the wire, `/events`,
+  `/stream` and `/override` send the held payment again under its own
+  `event_id` with the family's decision, rule (`approved_by_family` /
+  `denied_by_family`) and `resolved_by` (the resolving row's id).
+- `notice`: `new_payee` / `recent_payee` on a payment that went through to
+  someone new or first paid in the last 30 days - the FYI alert path.
+  `known_bill`: the guard recognized a rent or utility bill; it's left out of
+  the day's total. `explanation`: guard/explain.py, numbers checked.
+- `token` (guard/tokens.py): a signed delegation. With one, the chain comes
+  from the token and the request's is ignored; forged, altered or expired is
+  a 401. `ACCRUE_REQUIRE_TOKENS=1` refuses requests without one.
+- `GET /events?since=<id>` and `GET /stream` (server-sent events): payments
+  ordered by `event_id`. No token needed (see #26 for the privacy question).
+- `POST /override {event_id, action: approve|deny}`: dashboard only. It needs
   `Authorization: Bearer <dashboard token>` and a JSON body, or it gets 401
   or 415. The guard reads the token from `ACCRUE_DASHBOARD_TOKEN`, or makes
-  one up and prints the dashboard link `…/#token=<token>`. The agent's
-  process never has it, and phone alerts never carry it.
-- `GET /verify`: `{ok, first_bad_event_id}`. `POST /replay {policy}`: what
-  would have changed.
+  one up and prints the dashboard link `…/#token=<token>`. The agent's process
+  never has it, and phone alerts never carry it. An approval goes through
+  even past a limit - the family is the override.
+- `GET /verify[?anchor_id=&anchor_hash=]`: `{ok, first_bad_event_id,
+  first_bad_override_id, head}`. The anchor is a `head` seen earlier.
+- `GET /limits`: both columns of the spending limits.
+- `POST /replay {policy, since?}` (dashboard token): what a draft policy would
+  have changed in real history. New rules can say `@outcome("hold")`.
+- `POST /demo/run {scenario}`, `GET /demo/status` (guard started with
+  `--demo`, dashboard token): the video's scenarios. Only the requests are
+  scripted; the real guard decides.
 - `POST /inbound {session_id, source, content}` -> `{trusted, tainted, labels}`.
-  Taint sticks to the session until the daughter clears it.
+  Untrusted text taints that session, and the whole household for 6 hours.
 - `POST /outbound {session_id, recipient, channel, content}` ->
   `{decision: allow|redact|hold|block, findings}`. Every outbound send goes
   through this.
-- Every request carries `session_id`; the guard reads the session's taint and
-  uses the stricter column when tainted.
+- The tool decides which categories it can pay (`authorize.TOOL_CATEGORIES`):
+  `buy_gift_card` only `gift_card`, `send_zelle`/`send_wire` only `transfer`,
+  `send_crypto` only `crypto`, `pay_bill` the household categories. Send
+  `utility` or `rent` for bills; a plain `bill` is never a known bill.
+- Money moves only through the payout outbox (`ledger.queued_payouts()`,
+  `mark_sent()`): one payout per payment that went through. Never pay on an
+  `/authorize` answer - a retried `request_id` returns the same one again.
 
 ## Spending rules
 
-| Rule | Normal limit | After a scam flag |
-|---|---|---|
-| Daily total | $500 | $100 |
-| Gift cards per day | $100 | $0, needs approval |
-| New payee, first payment | $200 | Needs approval |
-| Known bills (utility, rent) | Up to last month + 20% | Unchanged |
-| Breaker | 3 denials in 10 min: everything holds | 1 denial |
+`guard/policies/family.cedar`. Each rule is one forbid with an `@id`;
+`authorize.RULE_OUTCOMES` says whether it denies or holds. A deny beats a
+hold; a rule the guard doesn't know denies.
 
-- The stricter column applies while the session is tainted, or after an AI
-  scam label, for 6 hours.
+| `rule` | Outcome | Normal | After a scam flag |
+|---|---|---|---|
+| `daily_cap` | deny | to someone new: over $500 in 24 h | over $100 |
+| `daily_cap_needs_approval` | hold | to someone she's paid before: over $500 | over $100 |
+| `gift_card_daily_cap` | deny | over $100 of gift cards in 24 h | - |
+| `gift_card_needs_approval` | hold | - | any gift card |
+| `new_payee_cap` | deny | first payment over $200 | - |
+| `new_payee_month_cap` | hold | over $200 to a payee in its first 30 days | - |
+| `new_payee_needs_approval` | hold | - | any first payment |
+| `recent_payee_cap` | hold | over $500 in 30 days to payees first paid in them | any payment to them |
+| `bill_increase` | hold | a known bill over last time + 20% | same |
+| `breaker` | hold | 3 denials in 10 min | 1 denial |
+| `delegation_tool`, `delegation_budget` | deny | a tool or branch budget the token doesn't grant | same |
+| `guard_unavailable` | hold | the rules engine failed or timed out | same |
+
+- "24 h" is rolling. The day's total leaves out known bills and payments the
+  family approved.
+- A known bill is a rent or utility payee last paid, as a bill, 20 to 45 days
+  ago - once a cycle.
+- The stricter column applies while the household is tainted (6 hours after
+  untrusted text), when the session is, or when the request says so.
 - Rules stay deterministic. The walls and the AI only decide which column
   applies, and only in the stricter direction.
 
 ## Implementation notes (guard)
 
-- **Reservation:** open with `BEGIN IMMEDIATE` (SQLite serializes writers),
-  insert the request as `pending`, read totals including pending rows, ask
-  Cedar, then mark `allowed` or `released`. Commit.
-- **Hash chain:** `row_hash = sha256(prev_hash + canonical_json(row))`.
-  `/verify` walks rows in id order and returns the first mismatch.
-- **Tokens:** macaroon-style chained HMAC. The root token is minted for Mom
-  with her limits; each child adds a caveat (smaller budget, narrower tools)
-  and re-signs. The guard checks the whole chain and uses the tightest caveat.
-- **Latency:** measure it, don't claim it. If shelling out to the Cedar CLI is
-  slow, try the `cedarpy` bindings, but only if they install cleanly in 15
-  minutes.
-- **Known bugs in the imported code**, one commit each: breaker ordered by row
-  id; lowercase scope names; indexed queries with a time window; timeout on
-  the Cedar call.
+- **Reservation:** `BEGIN IMMEDIATE` (SQLite serializes writers), read the
+  totals, ask Cedar, record the decision and its payout, commit - one
+  transaction. Tested with 50 at once landing exactly on the cap.
+- **Fail closed:** Cedar has a 2 s timeout; any failure is a `hold`. A
+  database failure is a 503 whose body is a hold.
+- **Hash chain:** `row_hash = sha256(prev_hash + canonical_json(row))`, an HMAC
+  with `ACCRUE_LEDGER_KEY`. `/verify` names the first bad row; an anchor
+  catches a rewrite of everything after it.
+- **Tokens:** macaroon-style chained HMAC (`ACCRUE_TOKEN_KEY`). The root is
+  minted for Mom; each child adds a caveat (agent, smaller budget, fewer
+  tools, expiry) and re-signs. The tightest caveat wins.
+- **Latency, measured:** about 8 ms per decision over HTTP, 11 ms with a token.
+- **Guarantees** are checked after the fact by `tests/guarantees.py`, which
+  the property, concurrency and chaos tests all end with.
 
 ## Dashboard copy
 
@@ -190,13 +229,17 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 
 Tests call the real `cedar` binary; they don't mock it.
 
-## Open before the noon freeze
+The guard for the live demo (it serves the plain dashboard and prints its
+links; the React app's dev proxy points at it):
 
-- The `/authorize` example has no `session_id`, but every request is
-  supposed to carry one. Add it to the example?
-- The response example is `"decision": "deny"` with `"needs_approval": true`.
-  When does a request get `hold` instead, and what `status` does a request
-  waiting for approval have (`held`)?
-- `api.py` lists `/flag`, which the contract doesn't define. `/inbound` and
-  `/outbound` are in the contract but not in `api.py`'s list. Which service
-  serves the wall endpoints?
+```bash
+ACCRUE_PEOPLE=mom ACCRUE_LEDGER_KEY=... ACCRUE_WALL_KEY=... ACCRUE_DASHBOARD_TOKEN=... \
+  .venv/bin/python -m guard.api --db ledger.db --demo
+```
+
+Without `ACCRUE_PEOPLE` (or `ACCRUE_REQUIRE_TOKENS=1` with `ACCRUE_TOKEN_KEY`),
+any "person" is accepted and each new one gets a fresh budget.
+
+## Open questions
+
+Settled ones are recorded on #1. Open items, with owners, are on #26.
