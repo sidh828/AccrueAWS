@@ -4,6 +4,7 @@ See PRIMER.md Part 2. Rows are only ever inserted, never updated or deleted;
 that's what makes the totals in aggregates.py trustworthy.
 """
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 
@@ -11,6 +12,16 @@ from datetime import datetime, timezone
 # budget and breaker queries in aggregates.py are an indexed equality
 # lookup instead of a scan of every row ever logged. (home, timestamp)
 # serves the windowed total; (home) serves "last event" in id order.
+#
+# A row is never changed, including when the family settles a held payment:
+# approving or denying it appends a new row whose `resolves` is the held
+# row's id (see authorize.resolve). A held payment can be settled once,
+# which the partial unique index enforces. Only ALLOW rows count toward
+# any total, so a HOLD counts for nothing until a row approving it lands.
+#
+# payee, category, tool, chain, reason, rule and context are filled in by
+# authorize.authorize_payment and empty on authorize_transfer's rows.
+# `context` is the exact JSON Cedar was asked about: the record of why.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
     id          INTEGER PRIMARY KEY,
@@ -22,14 +33,25 @@ CREATE TABLE IF NOT EXISTS events (
     resource    TEXT NOT NULL,
     amount_cents INTEGER NOT NULL
                 CHECK (typeof(amount_cents) = 'integer' AND amount_cents >= 0),
-    decision    TEXT NOT NULL CHECK (decision IN ('ALLOW', 'DENY')),
-    request_id  TEXT UNIQUE
+    decision    TEXT NOT NULL CHECK (decision IN ('ALLOW', 'DENY', 'HOLD')),
+    request_id  TEXT UNIQUE,
+    resolves    INTEGER REFERENCES events (id),
+    payee       TEXT,
+    category    TEXT,
+    tool        TEXT,
+    chain       TEXT,
+    reason      TEXT,
+    rule        TEXT,
+    context     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_session_id ON events (session_id);
 CREATE INDEX IF NOT EXISTS idx_events_scope_id ON events (scope_id);
 CREATE INDEX IF NOT EXISTS idx_events_home ON events (home);
 CREATE INDEX IF NOT EXISTS idx_events_home_time ON events (home, timestamp);
+CREATE INDEX IF NOT EXISTS idx_events_home_payee ON events (home, payee);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_resolves ON events (resolves)
+    WHERE resolves IS NOT NULL;
 
 CREATE TRIGGER IF NOT EXISTS prevent_event_updates
 BEFORE UPDATE ON events
@@ -118,7 +140,9 @@ def connect(db_path="ledger.db"):
 
 
 def insert_event(conn, timestamp, session_id, action, resource, amount_cents, decision,
-                  scope_id=None, request_id=None):
+                  scope_id=None, request_id=None, resolves=None, payee=None,
+                  category=None, tool=None, chain=None, reason=None, rule=None,
+                  context=None):
     """Append one event and return its database id.
 
     The caller owns the transaction. This is important for authorization:
@@ -130,7 +154,8 @@ def insert_event(conn, timestamp, session_id, action, resource, amount_cents, de
     Defaults to session_id, so a caller with no separate scope concept yet
     just scopes to itself - existing single-session behavior is unchanged.
     `request_id`, when given, is unique across the ledger (see
-    find_by_request_id).
+    find_by_request_id). The rest describe a family payment (see SCHEMA);
+    `chain` is a list and `context` a dict, both stored as JSON.
     """
     if scope_id is None:
         scope_id = session_id
@@ -138,12 +163,78 @@ def insert_event(conn, timestamp, session_id, action, resource, amount_cents, de
     cursor = conn.execute(
         "INSERT INTO events "
         "(timestamp, session_id, scope_id, home, action, resource, amount_cents, "
-        "decision, request_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "decision, request_id, resolves, payee, category, tool, chain, reason, "
+        "rule, context) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (timestamp, session_id, scope_id, home_scope(scope_id), action, resource,
-         amount_cents, decision, request_id),
+         amount_cents, decision, request_id, resolves, payee, category, tool,
+         None if chain is None else json.dumps(chain), reason, rule,
+         None if context is None else json.dumps(context, sort_keys=True)),
     )
     return cursor.lastrowid
+
+
+# Columns read back by get_event and contract_rows, in this order.
+_ROW_COLUMNS = ("id", "timestamp", "session_id", "scope_id", "home", "action",
+                "resource", "amount_cents", "decision", "request_id", "resolves",
+                "payee", "category", "tool", "chain", "reason", "rule", "context")
+
+
+def _row_dict(row):
+    event = dict(zip(_ROW_COLUMNS, row))
+    event["chain"] = json.loads(event["chain"]) if event["chain"] else None
+    event["context"] = json.loads(event["context"]) if event["context"] else None
+    return event
+
+
+def get_event(conn, event_id):
+    """One event as a dict of its columns (chain and context decoded), or
+    None."""
+    row = conn.execute(
+        f"SELECT {', '.join(_ROW_COLUMNS)} FROM events WHERE id = ?", (event_id,)
+    ).fetchone()
+    return None if row is None else _row_dict(row)
+
+
+# CLAUDE.md's event row: decision is lowercase, status follows from it.
+_STATUS = {"ALLOW": "allowed", "DENY": "released", "HOLD": "held"}
+
+
+def contract_rows(conn, since=0):
+    """Events with an id above `since`, in id order, shaped as CLAUDE.md's
+    event row - what GET /events and /stream send.
+
+    One field is added to the contract's: `resolves`, the event_id of the
+    held payment this row approves or denies (None otherwise). A held row
+    is settled once a later row resolves it; the held row itself never
+    changes. `explanation` and `row_hash` are None until explain.py and the
+    hash chain land.
+    """
+    rows = conn.execute(
+        f"SELECT {', '.join(_ROW_COLUMNS)} FROM events WHERE id > ? ORDER BY id",
+        (since,),
+    ).fetchall()
+    out = []
+    for event in map(_row_dict, rows):
+        decision = event["decision"]
+        out.append({
+            "event_id": event["id"],
+            "ts": event["timestamp"],
+            "status": _STATUS[decision],
+            "person": event["home"],
+            "chain": event["chain"] or event["scope_id"].split("/"),
+            "tool": event["tool"] or event["action"],
+            "amount_cents": event["amount_cents"],
+            "payee": event["payee"] or event["resource"],
+            "category": event["category"],
+            "decision": decision.lower(),
+            "rule": event["rule"],
+            "explanation": None,
+            "flagged": decision != "ALLOW",
+            "row_hash": None,
+            "resolves": event["resolves"],
+        })
+    return out
 
 
 def find_by_request_id(conn, request_id):
