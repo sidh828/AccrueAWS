@@ -52,7 +52,7 @@ function statusOf(event) {
   return { label: "Processing", type: "pending" };
 }
 
-export default function SecurityDemo({events = [], onRunScenario, demoBusy, canRunDemo,}) {
+export default function SecurityDemo({events = [], onRunScenario, demoBusy, canRunDemo, limits = STANDARD_LIMITS}) {
   // Compare gift-card requests against a hypothetical
   // checker that only has a $500 per-request limit.
   const allEvents = [...events].sort(
@@ -93,7 +93,7 @@ export default function SecurityDemo({events = [], onRunScenario, demoBusy, canR
   // Visualization scale only.
   // All actual monetary calculations remain integer cents.
   const scale = Math.max(
-    STANDARD_LIMITS.day,
+    limits.day,
     traditionalTotal
   );
 
@@ -101,7 +101,7 @@ export default function SecurityDemo({events = [], onRunScenario, demoBusy, canR
     `${(cents / scale) * 100}%`;
 
   const limitPosition =
-    `${(STANDARD_LIMITS.day / scale) * 100}%`;
+    `${(limits.day / scale) * 100}%`;
 
   return (
     <div className="security-demo">

@@ -5,7 +5,7 @@ Follows the guard's GET /events and pushes every newly stopped or held
 payment to ntfy (https://ntfy.sh). The phone runs the ntfy app, subscribed
 to the same topic.
 
-    NTFY_TOPIC=<topic> python3 dashboard/alerts.py --open http://<laptop-ip>:8001/
+    NTFY_TOPIC=<topic> python3 dashboard/alerts.py --open http://<laptop-ip>:8000/
     python3 dashboard/alerts.py --dry-run      # print alerts, send nothing
 
 A push that fails is kept and retried, backing off up to a minute. More
@@ -156,8 +156,8 @@ class Watcher:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Push stopped and held payments to a phone via ntfy")
-    parser.add_argument("--api", default="http://127.0.0.1:8001", help="the guard's API")
-    parser.add_argument("--open", default="http://127.0.0.1:8001/", help="dashboard URL a tap opens")
+    parser.add_argument("--api", default="http://127.0.0.1:8000", help="the guard's API")
+    parser.add_argument("--open", default="http://127.0.0.1:8000/", help="dashboard URL a tap opens")
     parser.add_argument("--server", default="https://ntfy.sh")
     parser.add_argument("--dry-run", action="store_true", help="print alerts instead of sending them")
     parser.add_argument("--replay", action="store_true", help="also alert on rows from before startup")

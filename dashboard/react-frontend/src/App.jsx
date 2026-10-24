@@ -1,12 +1,13 @@
 import SecurityDemo from './components/SecurityDemo.jsx';
 import { useMemo, useState } from 'react';
 import { Activity, ArrowRight, CheckCircle2, CircleAlert, CreditCard, LayoutDashboard, LockKeyhole, ShieldCheck, ShieldX, WifiOff } from 'lucide-react';
-import { useGuardEvents } from './api.js';
-import { money, STANDARD_LIMITS, summarize } from './format.js';
+import { useGuardEvents, useVerify } from './api.js';
+import { limitsFrom, money, summarize } from './format.js';
 import SpendingProgress from './components/SpendingProgress.jsx';
 import ApprovalQueue from './components/ApprovalQueue.jsx';
 import ActivityTimeline from './components/ActivityTimeline.jsx';
 import CategoryBreakdown from './components/CategoryBreakdown.jsx';
+import ProofPanel from './components/ProofPanel.jsx';
 
 const connectionLabels = {
   connecting: 'Connecting…',
@@ -34,7 +35,9 @@ function Sidebar({ view, setView }) {
 }
 
 export default function App() {
-  const {events, connection, error, busyId, override, runDemo, demoBusy, canRunDemo, } = useGuardEvents();
+  const {events, connection, error, busyId, override, runDemo, demoBusy, canRunDemo, limits: apiLimits } = useGuardEvents();
+  const limits = useMemo(() => limitsFrom(apiLimits), [apiLimits]);
+  const proof = useVerify(events.length);
   const [view, setView] = useState('overview');
   const [filter, setFilter] = useState('all');
   const summary = useMemo(() => summarize(events), [events]);
@@ -58,17 +61,17 @@ export default function App() {
           {view === 'overview' ? (
             <>
               <div className="page-heading"><div><div className="overline">FAMILY OVERVIEW</div><h1>Protecting what matters.</h1><p>See what Mom's AI assistants spend—and the suspicious requests they cannot complete.</p></div><div className="demo-tag">Accrue · Dashboard</div></div>
-              <SpendingProgress summary={summary}/>
+              <SpendingProgress summary={summary} limits={limits}/>
               <div className="stats-grid">
-                <div className="stat-card"><div className="stat-title"><CheckCircle2 size={17}/> Approved spending</div><strong>{money(summary.spent)}</strong><small>Completed payments today</small></div>
-                <div className="stat-card"><div className="stat-title"><ShieldCheck size={17}/> Standard limit remaining</div><strong>{money(Math.max(0, STANDARD_LIMITS.day - summary.spent))}</strong><small>Can be lower during security alerts</small></div>
+                <div className="stat-card"><div className="stat-title"><CheckCircle2 size={17}/> Approved spending</div><strong>{money(summary.spent)}</strong><small>Last 24 hours, not counting known bills</small></div>
+                <div className="stat-card"><div className="stat-title"><ShieldCheck size={17}/> Standard limit remaining</div><strong>{money(Math.max(0, limits.day - summary.spent))}</strong><small>Can be lower during security alerts</small></div>
                 <div className="stat-card"><div className="stat-title"><ShieldX size={17}/> Attempts stopped</div><strong>{summary.stoppedAttempts}</strong><small>Denied requests, not dollars saved</small></div>
               </div>
               <div className="dashboard-grid">
                 <div className="column-stack">
                   <section className="panel activity-panel"><div className="section-header"><div><div className="section-icon blue-icon"><Activity size={17}/></div><h3>Recent activity</h3></div><button className="text-link" onClick={() => setView('activity')}>View all <ArrowRight size={16}/></button></div><ActivityTimeline events={summary.today}/></section>
                 </div>
-                <div className="column-stack"><ApprovalQueue waiting={summary.waiting} processing={summary.processing} busyId={busyId} onOverride={override}/><CategoryBreakdown summary={summary}/></div>
+                <div className="column-stack"><ApprovalQueue waiting={summary.waiting} processing={summary.processing} busyId={busyId} onOverride={override}/><CategoryBreakdown summary={summary} limits={limits}/><ProofPanel result={proof.result} checkedAt={proof.checkedAt}/></div>
               </div>
             </>
           ) : view === 'demo' ? (
@@ -77,6 +80,7 @@ export default function App() {
               onRunScenario={runDemo}
               demoBusy={demoBusy}
               canRunDemo={canRunDemo}
+              limits={limits}
             />
           ) : (
             <>
@@ -84,7 +88,7 @@ export default function App() {
               <section className="panel full-activity"><div className="section-header"><div><div className="section-icon blue-icon"><Activity size={17}/></div><h3>Today's activity <span className="muted count-text">({summary.today.length})</span></h3></div><label className="filter-label">Show <select value={filter} onChange={(e) => setFilter(e.target.value)}><option value="all">All requests</option><option value="allowed">Allowed</option><option value="held">Waiting for you</option><option value="stopped">Stopped</option><option value="pending">Processing</option></select></label></div><ActivityTimeline events={summary.today} full filter={filter}/></section>
             </>
           )}
-          <footer className="footer">Accrue protects payments at the guard, not in the browser. <span>Demo frontend · Standard limits shown for illustration.</span></footer>
+          <footer className="footer">Accrue protects payments at the guard, not in the browser. <span>Limits come from the guard.</span></footer>
         </div>
       </main>
     </div>
