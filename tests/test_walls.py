@@ -1,6 +1,8 @@
 import pytest
+import threading
 
-from agent.tools import FakeGuard, ToolBox, TOOL_NAMES
+from agent.tools import FakeGuard, HttpGuard, ToolBox, TOOL_NAMES
+from guard import api
 from walls.secrets import SecretStore, aba_valid, luhn_valid
 from walls.inbound import wrap_untrusted
 
@@ -18,6 +20,24 @@ def g():
 @pytest.fixture
 def tools(g):
     return ToolBox(g, session_id="s1")
+
+
+@pytest.fixture
+def http_tools(tmp_path):
+    server = api.make_server(
+        str(tmp_path / "http-ledger.db"), "test-token", port=0,
+        wall_key=b"wall-http-test-key-" * 2,
+        contacts={"daughter@example.com"},
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    guard = HttpGuard(f"http://127.0.0.1:{server.server_address[1]}", timeout=2)
+    try:
+        yield ToolBox(guard, session_id="http-session")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 # ---- secrets ---------------------------------------------------------------
@@ -137,6 +157,49 @@ def test_alert_failure_cannot_turn_block_into_allow(g, tools):
     g.outbound_wall.on_alert = lambda e: 1 / 0
     tools.receive_message("sms", "code is 427193")
     assert tools.send_message("x", "sms", "427193")["decision"] == "block"
+
+
+def test_http_client_posts_inbound_and_outbound_to_real_guard(http_tools):
+    inbound = http_tools.receive_message("sms", "Your verification code is 427193.")
+    assert inbound["tainted"] is True
+
+    blocked = http_tools.send_message("scammer@evil.example", "sms", "The code is 427193.")
+    assert blocked["decision"] == "block"
+    assert blocked["sent"] is False
+    assert blocked["delivered_content"] is None
+    assert any(finding["kind"] == "received_code" for finding in blocked["findings"])
+
+
+def test_http_outbound_holds_unknown_recipient_in_tainted_session(http_tools):
+    http_tools.receive_message("email", "Please review the attached invoice.")
+
+    result = http_tools.send_message("new-vendor@example.com", "email", "Invoice received.")
+
+    assert result["decision"] == "hold"
+    assert result["sent"] is False
+    assert any(finding["kind"] == "unknown_recipient" for finding in result["findings"])
+
+
+def test_http_outbound_allows_configured_contact_in_tainted_session(http_tools):
+    http_tools.receive_message("email", "Please review the attached invoice.")
+
+    result = http_tools.send_message(
+        "daughter@example.com", "sms", "The invoice looks unusual."
+    )
+
+    assert result["decision"] == "allow"
+    assert result["sent"] is True
+    assert result["delivered_content"] == "The invoice looks unusual."
+
+
+def test_http_client_fails_closed_when_outbound_endpoint_is_unavailable():
+    tools = ToolBox(HttpGuard("http://127.0.0.1:1", timeout=0.1), session_id="offline")
+
+    result = tools.send_message("friend@example.com", "sms", "hello")
+
+    assert result["decision"] == "block"
+    assert result["sent"] is False
+    assert result["findings"][0]["kind"] == "guard_unavailable"
 
 
 # ---- tools / fake guard ------------------------------------------------------

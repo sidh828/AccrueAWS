@@ -1,5 +1,4 @@
-"""The attack table, as tests. If a number in the video or the Q&A comes from agent/attacks,
-it is asserted here. Runs against FakeGuard until the real engine is wired in."""
+"""Attack-table assertions for simulation outcomes and real Cedar-backed evidence."""
 import pytest
 
 from agent.attacks.attack_suite import ATTACKS, make_env, run_suite
@@ -65,3 +64,38 @@ def test_normal_day_unaffected_by_every_guard_we_own():
 def test_fifty_at_once_lands_exactly_on_the_cap(run):
     r = parallel_flood.run(make_env("ours"))
     assert r.through_cents == 50_000 and r.allowed == 10
+
+
+@pytest.mark.cedar
+def test_real_attack_evidence_uses_cedar_and_verifies_ledger():
+    table = run_suite(real_guard=True)
+    known_gaps = {attack.name for attack in ATTACKS if attack.known_gap}
+    leaked = {name for name, cells in table.items() if cells["ours"].status == LEAKED}
+    assert leaked <= known_gaps
+    for name, cells in table.items():
+        outcome = cells["ours"]
+        assert outcome.status != ERROR, (name, outcome.detail)
+        assert outcome.evidence["backend"] == "real_http_cedar_ledger"
+        assert outcome.evidence["cedar_version"]
+        integrity = outcome.evidence["ledger_verification"]
+        expected_count = integrity["head"]["event_id"] if integrity["head"] else 0
+        assert outcome.evidence["event_count"] == expected_count
+        if name == "Ledger row edited by hand":
+            assert outcome.status == BLOCKED
+            assert integrity["ok"] is False
+            assert integrity["first_bad_event_id"] == 1
+        else:
+            assert integrity["ok"] is True, name
+    for name in ("Ten $450", "Slow drip", "Gift cards blocked", "Two sub-agents",
+                 "50 requests", "Sub-agent fakes"):
+        (cells,) = [cells for attack, cells in table.items() if attack.startswith(name)]
+        assert cells["ours"].through_cents <= 50_000, name
+
+
+def test_simulation_report_is_explicitly_labeled():
+    from agent.attacks.attack_suite import run_metadata
+
+    metadata = run_metadata(real_guard=False)
+    assert metadata["mode"] == "simulation"
+    assert metadata["guard_backend"] == "FakeGuard simulation"
+    assert "source_worktree_clean" in metadata
