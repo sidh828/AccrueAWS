@@ -37,13 +37,16 @@ END;
 -- outlives one session_id (see NOTES.md "Ideas"). overrides is the only
 -- thing that can un-trip breaker.is_tripped for a scope - a human
 -- explicitly saying "let it keep going" after a DENY, logged the same
--- append-only way as everything else.
+-- append-only way as everything else. after_event_id is the last events.id
+-- at the moment the override was written: it's what orders an override
+-- against a DENY, not the timestamp, which is only kept for the audit.
 CREATE TABLE IF NOT EXISTS overrides (
-    id            INTEGER PRIMARY KEY,
-    timestamp     TEXT NOT NULL,
-    scope_id      TEXT NOT NULL,
-    authorized_by TEXT NOT NULL,
-    reason        TEXT NOT NULL
+    id             INTEGER PRIMARY KEY,
+    timestamp      TEXT NOT NULL,
+    scope_id       TEXT NOT NULL,
+    authorized_by  TEXT NOT NULL,
+    reason         TEXT NOT NULL,
+    after_event_id INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_overrides_scope_id ON overrides (scope_id);
@@ -116,10 +119,18 @@ def insert_override(conn, timestamp, scope_id, authorized_by, reason):
     """Record express human permission for a scope to resume after the
     circuit breaker trips it (see breaker.is_tripped). Append-only, same as
     events - this is the only way to un-trip a scope.
+
+    The override covers every event already in the ledger and nothing
+    after it. That cut-off is read from the ledger in the same statement,
+    never from `timestamp`: a caller-supplied timestamp dated in the future
+    would otherwise cover every DENY to come and switch the breaker off for
+    good, and one written as "...Z" instead of "...+00:00" sorts after a
+    DENY it actually came before.
     """
     cursor = conn.execute(
-        "INSERT INTO overrides (timestamp, scope_id, authorized_by, reason) "
-        "VALUES (?, ?, ?, ?)",
+        "INSERT INTO overrides "
+        "(timestamp, scope_id, authorized_by, reason, after_event_id) "
+        "VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(id), 0) FROM events))",
         (timestamp, scope_id, authorized_by, reason),
     )
     return cursor.lastrowid

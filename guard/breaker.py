@@ -16,7 +16,7 @@ existing cumulative_cost check, so a tripped scope never even gets that
 far.
 """
 
-from . import aggregates, ledger
+from . import aggregates
 
 
 def is_tripped(conn, scope_id):
@@ -24,6 +24,8 @@ def is_tripped(conn, scope_id):
     under it, was a DENY with no override logged after it. Overrides only
     count when logged against this exact scope_id - authorize.py calls this
     with the home ("agent-a"), so that's where an override has to go.
+
+    "After" is by row id (see ledger.insert_override), never by timestamp.
     """
     last = aggregates.last_event_for_scope(conn, scope_id)
     if last is None:
@@ -31,11 +33,12 @@ def is_tripped(conn, scope_id):
 
     # column order from aggregates.last_event_for_scope's SELECT:
     # id, timestamp, session_id, scope_id, action, resource, cost_usd, decision
-    _, deny_timestamp, _, _, _, _, _, decision = last
+    deny_id, _, _, _, _, _, _, decision = last
     if decision != "DENY":
         return False
 
-    return not any(
-        override_timestamp > deny_timestamp
-        for _, override_timestamp, _, _, _ in ledger.list_overrides(conn, scope_id)
-    )
+    override = conn.execute(
+        "SELECT 1 FROM overrides WHERE scope_id = ? AND after_event_id >= ? LIMIT 1",
+        (scope_id, deny_id),
+    ).fetchone()
+    return override is None

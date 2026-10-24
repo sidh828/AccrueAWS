@@ -54,6 +54,28 @@ def test_override_before_the_deny_does_not_count():
     assert breaker.is_tripped(c, "agent-a") is True
 
 
+def test_override_order_comes_from_the_ledger_not_its_timestamp():
+    """Regression test: overrides used to be ordered against a DENY by
+    comparing caller-supplied timestamps as strings. An override dated
+    9999-12-31 then covered every DENY to come, switching the breaker off
+    for good, and an override written as "...Z" sorted after a
+    "...+00:00" DENY it actually came before. Order is by row id now."""
+    c = conn()
+    ledger.insert_override(c, "9999-12-31T00:00:00+00:00", "agent-a",
+                            "sid", "future-dated, logged before the deny")
+    ledger.insert_event(c, "2026-10-24T13:00:00.500000+00:00", "sess-001",
+                         "transfer", "acct-1", 100, "DENY", scope_id="agent-a")
+    c.commit()
+    assert breaker.is_tripped(c, "agent-a") is True
+
+    # Logged after the deny, so it counts, even with a timestamp that
+    # sorts before it.
+    ledger.insert_override(c, "2026-10-24T13:00:00Z", "agent-a",
+                            "sid", "approved after the deny")
+    c.commit()
+    assert breaker.is_tripped(c, "agent-a") is False
+
+
 def test_deny_in_a_nested_task_trips_the_home():
     c = conn()
     ledger.insert_event(c, "t1", "sess-001", "transfer", "acct-1", 100,
