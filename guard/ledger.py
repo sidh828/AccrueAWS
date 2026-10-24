@@ -65,6 +65,18 @@ END;
 """
 
 
+def normalize_scope(scope_id):
+    """The one spelling of a scope that's stored and queried: lowercase.
+
+    The budget and the breaker are keyed on the scope's home, so "Mom" and
+    "mom" have to be the same person. Before this, an exact match treated
+    them as two budgets while SQLite's case-insensitive LIKE rolled some of
+    one into the other. Everything that writes or reads a scope_id goes
+    through here.
+    """
+    return scope_id.lower()
+
+
 def connect(db_path="ledger.db"):
     """Open a ledger database and create its schema if needed."""
     conn = sqlite3.connect(db_path)
@@ -87,6 +99,7 @@ def insert_event(conn, timestamp, session_id, action, resource, cost_usd, decisi
     """
     if scope_id is None:
         scope_id = session_id
+    scope_id = normalize_scope(scope_id)
     cursor = conn.execute(
         "INSERT INTO events "
         "(timestamp, session_id, scope_id, action, resource, cost_usd, decision) "
@@ -108,7 +121,7 @@ def list_events(conn, session_id=None, scope_id=None):
         params.append(session_id)
     if scope_id is not None:
         conditions.append("scope_id = ?")
-        params.append(scope_id)
+        params.append(normalize_scope(scope_id))
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
     query += " ORDER BY id"
@@ -131,7 +144,7 @@ def insert_override(conn, timestamp, scope_id, authorized_by, reason):
         "INSERT INTO overrides "
         "(timestamp, scope_id, authorized_by, reason, after_event_id) "
         "VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(id), 0) FROM events))",
-        (timestamp, scope_id, authorized_by, reason),
+        (timestamp, normalize_scope(scope_id), authorized_by, reason),
     )
     return cursor.lastrowid
 
@@ -147,5 +160,5 @@ def list_overrides(conn, scope_id=None):
     return conn.execute(
         "SELECT id, timestamp, scope_id, authorized_by, reason "
         "FROM overrides WHERE scope_id = ? ORDER BY id",
-        (scope_id,),
+        (normalize_scope(scope_id),),
     ).fetchall()

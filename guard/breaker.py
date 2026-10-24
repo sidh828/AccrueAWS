@@ -16,7 +16,7 @@ existing cumulative_cost check, so a tripped scope never even gets that
 far.
 """
 
-from . import aggregates
+from . import aggregates, ledger
 
 
 def is_tripped(conn, scope_id):
@@ -39,6 +39,6 @@ def is_tripped(conn, scope_id):
 
     override = conn.execute(
         "SELECT 1 FROM overrides WHERE scope_id = ? AND after_event_id >= ? LIMIT 1",
-        (scope_id, deny_id),
+        (ledger.normalize_scope(scope_id), deny_id),
     ).fetchone()
     return override is None

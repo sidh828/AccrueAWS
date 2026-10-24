@@ -5,6 +5,8 @@ so it must not count toward the next check — otherwise a burst of rejected
 requests would itself push a session over budget.
 """
 
+from .ledger import normalize_scope
+
 
 def cumulative_cost(conn, session_id):
     row = conn.execute(
@@ -65,6 +67,7 @@ def cumulative_cost_for_scope(conn, scope_id, since=None):
     Only decision = 'ALLOW' rows count, same reason as cumulative_cost
     above: a DENYed attempt never happened.
     """
+    scope_id = normalize_scope(scope_id)
     if scope_id == "":
         query = "SELECT COALESCE(SUM(cost_usd), 0) FROM events WHERE decision = 'ALLOW'"
         params = []
@@ -101,6 +104,7 @@ def last_event_for_scope(conn, scope_id):
     thing that happened anywhere in a scope was a DENY - a DENY in one task
     has to trip its siblings too, or the agent just moves to another task.
     """
+    scope_id = normalize_scope(scope_id)
     return conn.execute(
         "SELECT id, timestamp, session_id, scope_id, action, resource, "
         "cost_usd, decision FROM events "

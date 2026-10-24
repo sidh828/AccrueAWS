@@ -140,6 +140,26 @@ def test_other_homes_are_unaffected(conn):
     ) == "ALLOW"
 
 
+def test_scope_names_are_case_insensitive(conn):
+    """Regression test: "Mom" and "mom" were two budgets (exact match) that
+    still leaked into each other (SQLite's LIKE ignores case), so the same
+    person got $10,000 per spelling. Scopes are lowercased on the way in
+    and out now: one budget, one breaker, and an override logged under any
+    spelling resets it."""
+    assert authorize.authorize_transfer(conn, "s1", "acct-1234", 6000, scope_id="Mom") == "ALLOW"
+    assert authorize.authorize_transfer(
+        conn, "s2", "acct-1234", 6000, scope_id="MOM/bills"
+    ) == "DENY"
+    assert authorize.authorize_transfer(conn, "s3", "acct-1234", 1, scope_id="mom") == "DENY"
+
+    ledger.insert_override(
+        conn, datetime.now(timezone.utc).isoformat(), "MoM", "sid",
+        "test: an override under another spelling still resets the breaker",
+    )
+    conn.commit()
+    assert authorize.authorize_transfer(conn, "s3", "acct-1234", 1, scope_id="mom") == "ALLOW"
+
+
 def test_session_id_with_a_slash_is_not_split_into_a_home(conn):
     """Without an explicit scope_id, the session_id doubles as the scope.
     Splitting it on "/" would make unrelated sessions "user/123" and
