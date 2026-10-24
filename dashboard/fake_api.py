@@ -139,6 +139,10 @@ class Handler(BaseHTTPRequestHandler):
         if url.path in STATIC:
             name, content_type = STATIC[url.path]
             return self._send(200, (HERE / name).read_bytes(), content_type)
+        if url.path == "/whoami":
+            return self._json(200, {
+                "role": "approver" if self._from_dashboard() else "viewer",
+            })
         if url.path == "/events":
             try:
                 since = int(parse_qs(url.query).get("since", ["0"])[0])

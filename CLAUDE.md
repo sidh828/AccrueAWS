@@ -22,10 +22,12 @@ as-is. Everything after it was built at HackOHI/O 2026.
 
 - Contract frozen at noon. Changes after that need everyone's agreement.
 - Push every hour. The commit graph is our evidence of what we built.
-- Tier 1 works end to end before anyone touches Tier 2. The 6 PM gate is non-negotiable.
+- Tier 1 works end to end before anyone touches Tier 2. The 6 PM gate is
+  non-negotiable.
 - Design freeze at 6 PM: polish after that, no new layouts.
 - Stay in your own folder (see Layout). Ask before editing someone else's.
-- Read every line Claude writes in your folder. Judges will ask about it on the live call.
+- Read every line Claude writes in your folder. Judges will ask about it on
+  the live call.
 - Log AI use in `AI_USAGE.md`: what we asked, what we rejected and why, how
   we checked it, which decisions a human made. Update at 2 PM, 6 PM and 11 PM.
 
@@ -146,7 +148,7 @@ everywhere the same way: allowed, waiting for you, stopped.
 
 ## Layout and owners
 
-```
+```text
 CLAUDE.md               contract + invariants; every Claude session reads this
 guard/                  DHARVIK
   ledger.py             append-only SQLite log, hash-chained

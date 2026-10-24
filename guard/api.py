@@ -18,9 +18,14 @@ ledger and Cedar.
 It behaves like dashboard/fake_api.py on purpose, so the dashboard switches
 from the stand-in to this without changes:
 
-- /override needs `Authorization: Bearer <token>` and a JSON body, as in
-  #9. The token is ACCRUE_DASHBOARD_TOKEN, or made up at startup and
-  printed in the dashboard link. The agent never gets it.
+- Every data route needs a role-specific bearer credential. Set
+  ACCRUE_AGENT_TOKEN, ACCRUE_VIEWER_TOKEN and ACCRUE_APPROVER_TOKEN;
+  ACCRUE_ADMIN_TOKEN is optional. Credentials must be distinct and at
+  least 32 characters. ACCRUE_DASHBOARD_TOKEN is a temporary
+  approver-token alias.
+- Agents can call /authorize, /inbound and /outbound. Viewers and approvers
+  can read; approvers and admins can also call /override. Static dashboard
+  files are public so the browser can load before it reads the URL fragment.
 - Rows are sent as payments, not ledger entries. The ledger never changes a
   row: approving a hold appends a row that resolves it. Sent as is, the
   dashboard would count an approved payment twice. So /events, /stream and
@@ -48,7 +53,6 @@ import argparse
 import hmac
 import json
 import os
-import secrets
 import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -72,6 +76,16 @@ MAX_BODY = 10_000  # bytes; an /authorize body is a few hundred
 MAX_STREAMS = 50  # live /stream connections at once
 TIMEOUT = 30  # seconds before a stalled connection is dropped
 STREAM_POLL = 1.0  # seconds between ledger checks when nothing woke a stream
+MIN_TOKEN_LENGTH = 32
+ROLE_PERMISSIONS = {
+    ("GET", "/whoami"): frozenset({"agent", "viewer", "approver", "admin"}),
+    ("GET", "*"): frozenset({"viewer", "approver", "admin"}),
+    ("POST", "/authorize"): frozenset({"agent", "admin"}),
+    ("POST", "/inbound"): frozenset({"agent", "admin"}),
+    ("POST", "/outbound"): frozenset({"agent", "admin"}),
+    ("POST", "/override"): frozenset({"approver", "admin"}),
+}
+REQUIRED_ROLES = frozenset({"agent", "viewer", "approver"})
 
 # The /authorize fields passed through to authorize.authorize_payment.
 REQUIRED = ("person", "chain", "tool", "amount_cents", "payee", "category", "session_id")
@@ -151,7 +165,7 @@ def limits():
 class Handler(BaseHTTPRequestHandler):
     # Set by make_server.
     db_path = None
-    token = None
+    role_tokens = None
     sessions = None  # walls.inbound.SessionStore: taint, shared with /inbound
     inbound_wall = None
     outbound_wall = None
@@ -166,6 +180,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         url = urlparse(self.path)
+        if url.path not in STATIC and url.path not in (
+            "/whoami", "/stream", "/limits", "/events", "/verify"
+        ):
+            return self._json(404, {"error": "not found"})
+        role = None
+        if url.path not in STATIC:
+            role = self._authenticated_role("GET", url.path)
+            if role is None:
+                return
+        if url.path == "/whoami":
+            return self._json(200, {"role": role})
         query = parse_qs(url.query)
         if url.path in STATIC:
             name, content_type = STATIC[url.path]
@@ -200,12 +225,13 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path not in ("/authorize", "/override", "/inbound", "/outbound"):
             return self._json(404, {"error": "not found"})
+        role = self._authenticated_role("POST", path)
+        if role is None:
+            return
         # JSON only: a web page can send a text/plain POST anywhere without
         # asking first. A JSON body makes the browser ask (CORS) first.
         if self.headers.get_content_type() != "application/json":
             return self._json(415, {"error": "the body must be JSON"})
-        if path == "/override" and not self._from_dashboard():
-            return self._json(401, {"error": "approving needs the dashboard's token"})
         body = self._body()
         if body is None:
             return
@@ -216,6 +242,37 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/outbound":
             return self._outbound(body)
         return self._override(body)
+
+    def _authenticated_role(self, method, path):
+        permissions = ROLE_PERMISSIONS.get((method, path), ROLE_PERMISSIONS.get((method, "*")))
+        if permissions is None:
+            self._json(404, {"error": "not found"})
+            return None
+        scheme, _, supplied = self.headers.get("Authorization", "").partition(" ")
+        if scheme.lower() != "bearer" or not supplied:
+            self._unauthorized()
+            return None
+        role = None
+        for candidate, expected in self.role_tokens.items():
+            if hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
+                role = candidate
+        if role is None:
+            self._unauthorized()
+            return None
+        if role not in permissions:
+            self._json(403, {"error": "this role cannot access the requested resource"})
+            return None
+        return role
+
+    def _unauthorized(self):
+        body = json.dumps({"error": "a valid bearer credential is required"}).encode()
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", "Bearer")
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self._cors()
+        self.end_headers()
+        self.wfile.write(body)
 
     def _authorize(self, body):
         status, response = answer_authorize(self._ledger, body, self.sessions)
@@ -318,10 +375,6 @@ class Handler(BaseHTTPRequestHandler):
         with self.changed:
             self.changed.notify_all()
 
-    def _from_dashboard(self):
-        scheme, _, sent = self.headers.get("Authorization", "").partition(" ")
-        return scheme.lower() == "bearer" and hmac.compare_digest(sent.encode(), self.token.encode())
-
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
@@ -358,15 +411,15 @@ class _Connection:
         self.conn.close()
 
 
-def make_server(db_path, token, host="127.0.0.1", port=8000, wall_key=None,
-                contacts=None, max_streams=MAX_STREAMS):
-    """A server for the ledger at `db_path`. `token` is the dashboard's
-    secret for /override. `wall_key` (32+ bytes) keys the walls' stored
+def make_server(db_path, token=None, host="127.0.0.1", port=8000, wall_key=None,
+                contacts=None, max_streams=MAX_STREAMS, role_tokens=None):
+    """A server for the ledger at `db_path`. `token` is a legacy alias for
+    the approver credential. `wall_key` (32+ bytes) keys the walls' stored
     digests of received codes; with it, taint and received codes are kept
     in the database and survive a restart, without it they live in memory.
-    `contacts` are the recipients /outbound always allows."""
-    if not token:
-        raise ValueError("the dashboard token can't be empty")
+    `contacts` are the recipients /outbound always allows. The agent, viewer,
+    and approver credentials are required; the admin credential is optional."""
+    role_tokens = _validated_role_tokens(role_tokens, token)
     storage = None
     if wall_key is not None:
         key = wall_key.encode() if isinstance(wall_key, str) else wall_key
@@ -380,13 +433,48 @@ def make_server(db_path, token, host="127.0.0.1", port=8000, wall_key=None,
         conn.execute("PRAGMA journal_mode=WAL")
     conn.close()
     handler = type("BoundHandler", (Handler,), {
-        "db_path": db_path, "token": token, "sessions": sessions,
+        "db_path": db_path, "role_tokens": role_tokens, "sessions": sessions,
         "inbound_wall": InboundWall(sessions, secrets_store),
         "outbound_wall": OutboundWall(secrets_store, sessions, contacts=contacts or set()),
         "streams": threading.BoundedSemaphore(max_streams),
         "changed": threading.Condition(),
     })
     return ThreadingHTTPServer((host, port), handler)
+
+
+def _validated_role_tokens(role_tokens, legacy_approver_token=None):
+    if role_tokens is None:
+        role_tokens = {
+            "agent": os.environ.get("ACCRUE_AGENT_TOKEN"),
+            "viewer": os.environ.get("ACCRUE_VIEWER_TOKEN"),
+            "approver": (
+                os.environ.get("ACCRUE_APPROVER_TOKEN")
+                or legacy_approver_token
+                or os.environ.get("ACCRUE_DASHBOARD_TOKEN")
+            ),
+            "admin": os.environ.get("ACCRUE_ADMIN_TOKEN"),
+        }
+    if not isinstance(role_tokens, dict):
+        raise ValueError("role_tokens must map role names to bearer credentials")
+    unknown_roles = set(role_tokens) - {"agent", "viewer", "approver", "admin"}
+    if unknown_roles:
+        raise ValueError(f"unknown roles: {', '.join(sorted(unknown_roles))}")
+    configured = {role: value for role, value in role_tokens.items() if value is not None}
+    missing = REQUIRED_ROLES - configured.keys()
+    if missing:
+        raise ValueError(
+            "configure distinct bearer credentials (at least 32 characters) for: "
+            + ", ".join(sorted(missing))
+        )
+    for role, value in configured.items():
+        if type(value) is not str or len(value) < MIN_TOKEN_LENGTH:
+            raise ValueError(
+                f"the {role} credential must be at least {MIN_TOKEN_LENGTH} characters"
+            )
+    values = list(configured.values())
+    if len(set(values)) != len(values):
+        raise ValueError("each role must use a distinct bearer credential")
+    return configured
 
 
 def main(argv=None):
@@ -396,22 +484,32 @@ def main(argv=None):
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args(argv)
 
-    token = os.environ.get("ACCRUE_DASHBOARD_TOKEN") or secrets.token_urlsafe(24)
+    role_tokens = {
+        "agent": os.environ.get("ACCRUE_AGENT_TOKEN"),
+        "viewer": os.environ.get("ACCRUE_VIEWER_TOKEN"),
+        "approver": (
+            os.environ.get("ACCRUE_APPROVER_TOKEN")
+            or os.environ.get("ACCRUE_DASHBOARD_TOKEN")
+        ),
+        "admin": os.environ.get("ACCRUE_ADMIN_TOKEN"),
+    }
     wall_key = os.environ.get("ACCRUE_WALL_KEY")
     contacts = {c.strip() for c in os.environ.get("ACCRUE_ALLOWED_CONTACTS", "").split(",")
                 if c.strip()}
-    server = make_server(args.db, token, args.host, args.port, wall_key=wall_key,
-                         contacts=contacts)
+    server = make_server(args.db, host=args.host, port=args.port, wall_key=wall_key,
+                         contacts=contacts, role_tokens=role_tokens)
     base = f"http://{args.host}:{args.port}/"
     print(f"guard API on {base}  (ledger: {args.db})")
-    print(f"dashboard, can approve:  {base}#token={token}")
-    print(f"dashboard, read-only:    {base}")
+    print(f"dashboard, can approve:  {base}#token={role_tokens['approver']}")
+    print(f"dashboard, read-only:    {base}#token={role_tokens['viewer']}")
+    if role_tokens.get("admin"):
+        print("admin bearer credential configured; do not share it with the browser")
     if not os.environ.get("ACCRUE_LEDGER_KEY"):
         print("note: ACCRUE_LEDGER_KEY isn't set, so the ledger is hashed without a key")
     if not wall_key:
         print("note: ACCRUE_WALL_KEY isn't set, so taint and received codes are kept in "
               "memory and forgotten on restart")
-    print("(open the first link once on each device that should approve; Ctrl-C to stop)",
+    print("(open each dashboard link on the matching device; Ctrl-C to stop)",
           flush=True)
     try:
         server.serve_forever()

@@ -38,16 +38,23 @@ class LedgerGuard:
         self._fault: str | None = None
         self._directory = tempfile.TemporaryDirectory(prefix="accrue-attack-")
         self.database_path = str(Path(self._directory.name) / "ledger.db")
+        self.agent_token = secrets.token_urlsafe(48)
+        self.viewer_token = secrets.token_urlsafe(48)
+        self.approver_token = secrets.token_urlsafe(48)
         self.server = api.make_server(
             self.database_path,
-            "attack-suite-dashboard-token",
             port=0,
             wall_key=secrets.token_bytes(32),
+            role_tokens={
+                "agent": self.agent_token,
+                "viewer": self.viewer_token,
+                "approver": self.approver_token,
+            },
         )
         self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
         self._server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self._server_thread.start()
-        self.client = HttpGuard(self.base_url, timeout=30)
+        self.client = HttpGuard(self.base_url, timeout=30, token=self.agent_token)
         with self._cedar_lock:
             authorize.CEDAR_BIN = self.cedar_path
 
@@ -74,7 +81,10 @@ class LedgerGuard:
         return self.client.outbound(session_id, recipient, channel, content)
 
     def evidence(self) -> dict:
-        request = urllib.request.Request(self.base_url + "/verify")
+        request = urllib.request.Request(
+            self.base_url + "/verify",
+            headers={"Authorization": f"Bearer {self.viewer_token}"},
+        )
         with urllib.request.urlopen(request, timeout=5) as response:
             verification = json.loads(response.read())
         head = verification["head"]

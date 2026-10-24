@@ -18,7 +18,17 @@ from guard import api, ledger
 
 pytestmark = pytest.mark.cedar
 
-TOKEN = "test-dashboard-token"
+AGENT_TOKEN = "agent-" + "a" * 40
+VIEWER_TOKEN = "viewer-" + "v" * 40
+APPROVER_TOKEN = "approver-" + "p" * 40
+ADMIN_TOKEN = "admin-" + "d" * 40
+ROLE_TOKENS = {
+    "agent": AGENT_TOKEN,
+    "viewer": VIEWER_TOKEN,
+    "approver": APPROVER_TOKEN,
+    "admin": ADMIN_TOKEN,
+}
+AUTO_TOKEN = object()
 WALL_KEY = b"test-wall-key-" * 3
 CONTRACT_FIELDS = {
     "event_id", "ts", "status", "person", "chain", "tool", "amount_cents", "payee",
@@ -27,7 +37,7 @@ CONTRACT_FIELDS = {
 
 
 def start(db_path, **kwargs):
-    server = api.make_server(db_path, TOKEN, port=0, wall_key=WALL_KEY,
+    server = api.make_server(db_path, port=0, wall_key=WALL_KEY, role_tokens=ROLE_TOKENS,
                              contacts={"daughter@example.com"}, **kwargs)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, {"base": f"http://127.0.0.1:{server.server_address[1]}", "db": db_path,
@@ -42,12 +52,14 @@ def guard(tmp_path):
     server.server_close()
 
 
-def call(guard, method, path, body=None, token=None, content_type="application/json"):
+def call(guard, method, path, body=None, token=AUTO_TOKEN, content_type="application/json"):
     data = None if body is None else (
         body if isinstance(body, bytes) else json.dumps(body).encode())
     request = urllib.request.Request(guard["base"] + path, data=data, method=method)
     if data is not None:
         request.add_header("Content-Type", content_type)
+    if token is AUTO_TOKEN:
+        token = (APPROVER_TOKEN if path == "/override" else AGENT_TOKEN) if method == "POST" else VIEWER_TOKEN
     if token:
         request.add_header("Authorization", f"Bearer {token}")
     try:
@@ -135,13 +147,53 @@ def test_override_needs_the_dashboards_token_and_json(guard):
     assert held["decision"] == "hold"
     approve = {"event_id": held["event_id"], "action": "approve"}
 
-    assert call(guard, "POST", "/override", approve)[0] == 401
+    assert call(guard, "POST", "/override", approve, token=None)[0] == 401
     assert call(guard, "POST", "/override", approve, token="wrong")[0] == 401
-    assert call(guard, "POST", "/override", json.dumps(approve).encode(), token=TOKEN,
+    assert call(guard, "POST", "/override", json.dumps(approve).encode(), token=APPROVER_TOKEN,
                 content_type="text/plain")[0] == 415
     # Still waiting after all of that.
     _, rows = call(guard, "GET", "/events")
     assert rows[-1]["status"] == "held"
+
+
+def test_roles_are_required_and_scoped_to_their_routes(guard):
+    assert call(guard, "GET", "/events", token=None)[0] == 401
+    assert call(guard, "POST", "/authorize", {}, token=None)[0] == 401
+    assert call(guard, "GET", "/whoami", token=AGENT_TOKEN) == (200, {"role": "agent"})
+    assert call(guard, "GET", "/events", token=AGENT_TOKEN)[0] == 403
+    assert call(guard, "POST", "/override", {}, token=AGENT_TOKEN)[0] == 403
+    assert call(guard, "POST", "/override", {}, token=VIEWER_TOKEN)[0] == 403
+    assert call(guard, "POST", "/inbound", {
+        "session_id": "role-test", "source": "sms", "content": "hello",
+    }, token=VIEWER_TOKEN)[0] == 403
+
+
+def test_admin_can_read_authorize_and_override(guard):
+    assert call(guard, "GET", "/whoami", token=ADMIN_TOKEN) == (200, {"role": "admin"})
+    assert call(guard, "GET", "/events", token=ADMIN_TOKEN)[0] == 200
+    assert call(guard, "POST", "/inbound", {
+        "session_id": "admin-test", "source": "sms", "content": "hello",
+    }, token=ADMIN_TOKEN)[0] == 200
+    known_payee(guard, "giftcards.example", "gift_card")
+    status, held = call(guard, "POST", "/authorize", {
+        "person": "mom", "chain": ["mom", "bills-agent"], "tool": "buy_gift_card",
+        "amount_cents": 5_000, "payee": "giftcards.example", "category": "gift_card",
+        "session_id": "admin-test", "tainted": True,
+    }, token=ADMIN_TOKEN)
+    assert status == 200 and held["decision"] == "hold"
+    assert call(guard, "POST", "/override", {
+        "event_id": held["event_id"], "action": "approve",
+    }, token=ADMIN_TOKEN)[0] == 200
+
+
+@pytest.mark.parametrize("tokens", [
+    {"viewer": VIEWER_TOKEN, "approver": APPROVER_TOKEN},
+    {"agent": "short", "viewer": VIEWER_TOKEN, "approver": APPROVER_TOKEN},
+    {"agent": AGENT_TOKEN, "viewer": VIEWER_TOKEN, "approver": VIEWER_TOKEN},
+])
+def test_role_credentials_must_be_complete_strong_and_distinct(tmp_path, tokens):
+    with pytest.raises(ValueError):
+        api.make_server(str(tmp_path / "invalid.db"), role_tokens=tokens)
 
 
 def test_an_approval_settles_the_payment_it_resolves(guard):
@@ -151,7 +203,7 @@ def test_an_approval_settles_the_payment_it_resolves(guard):
     known_payee(guard)
     _, held = pay(guard, 5_000, "zelle:new-contact", "transfer", tainted=True)
     status, view = call(guard, "POST", "/override",
-                        {"event_id": held["event_id"], "action": "approve"}, token=TOKEN)
+                        {"event_id": held["event_id"], "action": "approve"}, token=APPROVER_TOKEN)
     assert status == 200
     assert view["event_id"] == held["event_id"]
     assert (view["decision"], view["status"], view["rule"]) == (
@@ -171,9 +223,9 @@ def test_an_approval_settles_the_payment_it_resolves(guard):
     assert pay(guard, 1)[1]["rule"] == "daily_cap_needs_approval"
 
     assert call(guard, "POST", "/override",
-                {"event_id": held["event_id"], "action": "deny"}, token=TOKEN)[0] == 409
+                {"event_id": held["event_id"], "action": "deny"}, token=APPROVER_TOKEN)[0] == 409
     assert call(guard, "POST", "/override",
-                {"event_id": 999, "action": "deny"}, token=TOKEN)[0] == 404
+                {"event_id": 999, "action": "deny"}, token=APPROVER_TOKEN)[0] == 404
 
 
 def test_a_broken_rules_engine_holds(guard, monkeypatch, tmp_path):
@@ -186,7 +238,7 @@ def test_a_broken_rules_engine_holds(guard, monkeypatch, tmp_path):
 
 
 def test_a_broken_ledger_answers_hold_not_allow(tmp_path):
-    server = api.make_server(str(tmp_path / "ledger.db"), TOKEN, port=0)
+    server = api.make_server(str(tmp_path / "ledger.db"), port=0, role_tokens=ROLE_TOKENS)
     server.RequestHandlerClass.db_path = str(tmp_path / "missing-dir" / "ledger.db")
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
@@ -204,7 +256,8 @@ def test_the_stream_sends_new_payments_and_settled_ones(guard):
     known_payee(guard)
     host, port = guard["base"].removeprefix("http://").split(":")
     stream = http.client.HTTPConnection(host, int(port), timeout=10)
-    stream.request("GET", "/stream", headers={"Last-Event-ID": "1"})
+    stream.request("GET", "/stream", headers={
+        "Last-Event-ID": "1", "Authorization": f"Bearer {VIEWER_TOKEN}"})
     response = stream.getresponse()
     assert response.status == 200
     assert response.getheader("Content-Type") == "text/event-stream"
@@ -223,7 +276,8 @@ def test_the_stream_sends_new_payments_and_settled_ones(guard):
     assert event[0] == f"id: {held['event_id']}"
     assert json.loads(event[1].removeprefix("data: "))["status"] == "held"
 
-    call(guard, "POST", "/override", {"event_id": held["event_id"], "action": "deny"}, token=TOKEN)
+    call(guard, "POST", "/override", {"event_id": held["event_id"], "action": "deny"},
+         token=APPROVER_TOKEN)
     event = next_event()
     assert len(event) == 1  # no id line: an old payment, settled
     settled = json.loads(event[0].removeprefix("data: "))
@@ -362,4 +416,5 @@ def test_taint_and_received_codes_survive_a_restart(tmp_path):
 
 def test_a_short_wall_key_is_refused(tmp_path):
     with pytest.raises(ValueError, match="32 bytes"):
-        api.make_server(str(tmp_path / "ledger.db"), TOKEN, port=0, wall_key="too-short")
+        api.make_server(str(tmp_path / "ledger.db"), port=0, role_tokens=ROLE_TOKENS,
+                        wall_key="too-short")

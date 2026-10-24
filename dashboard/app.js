@@ -37,14 +37,16 @@ let liveText = "Connecting…";
 let broken = false; // the last redraw threw
 let drawQueued = false;
 
-// Approving needs the dashboard's token. The server prints a link ending in
-// #token=...; opening it once on a device lets that device approve. The
-// token is kept on the device and taken out of the address bar, so it never
-// shows on a shared screen or in the video. Without it the page is
-// read-only. The agent never has it.
+// Role-specific bearer credentials arrive in a URL fragment, which is never
+// sent to the server. The API decides what each credential can do.
 const TOKEN_KEY = "accrue-dashboard-token";
 const READ_ONLY = "To approve or deny from this screen, open the dashboard link the server printed.";
 let token = takeToken();
+let role = null;
+
+function authHeaders(headers = {}) {
+  return token ? { ...headers, Authorization: `Bearer ${token}` } : headers;
+}
 
 function takeToken() {
   const fromLink = new URLSearchParams(location.hash.slice(1)).get("token");
@@ -71,21 +73,19 @@ function forgetToken() {
 
 // ---- data ---------------------------------------------------------------
 
-function connect() {
-  const stream = new EventSource(`${API}/stream`);
-  stream.onopen = () => setLive("Live");
-  stream.onmessage = (e) => upsert([JSON.parse(e.data)]);
-  stream.onerror = () => {
-    // CLOSED means the server has no /stream (yet): poll /events instead.
-    // Otherwise the browser is already reconnecting by itself.
-    if (stream.readyState === EventSource.CLOSED) poll();
-    else setLive("Reconnecting…");
-  };
+async function identify() {
+  const res = await fetch(`${API}/whoami`, { headers: authHeaders() });
+  if (res.status === 401) forgetToken();
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  role = (await res.json()).role;
+  draw();
+  if (role === "agent") setLive("Agent access cannot view the dashboard.");
 }
 
 async function poll() {
   try {
-    const res = await fetch(`${API}/events?since=${lastId}`);
+    const res = await fetch(`${API}/events?since=${lastId}`, { headers: authHeaders() });
+    if (res.status === 401) forgetToken();
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     upsert(await res.json());
     setLive("Live (checking every second)");
@@ -93,6 +93,44 @@ async function poll() {
     setLive("Can't connect. Retrying…");
   }
   setTimeout(poll, 1000);
+}
+
+async function connect() {
+  try {
+    await identify();
+    if (role === "agent") return;
+    const res = await fetch(`${API}/stream`, {
+      headers: authHeaders({ "Last-Event-ID": String(lastId) }),
+    });
+    if (res.status === 401) forgetToken();
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.headers.get("Content-Type")?.startsWith("text/event-stream") || !res.body) {
+      return poll();
+    }
+    setLive("Live");
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split(/\r?\n\r?\n/);
+      buffer = events.pop();
+      for (const event of events) {
+        const data = event.split(/\r?\n/)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart())
+          .join("\n");
+        if (data) upsert([JSON.parse(data)]);
+      }
+    }
+    throw new Error("The event stream closed");
+  } catch (err) {
+    setLive(token ? `Can't connect. Retrying… (${err.message})` : READ_ONLY);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    connect();
+  }
 }
 
 function upsert(list) {
@@ -110,10 +148,11 @@ async function override(row, action) {
   try {
     const res = await fetch(`${API}/override`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ event_id: row.event_id, action }),
     });
-    if (res.status === 401) forgetToken(); // a stale or wrong token: back to read-only
+    if (res.status === 401) forgetToken();
+    if (res.status === 403) throw new Error("This role cannot approve payments.");
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     // A changed old row doesn't come back through /events?since, so take
     // it from the response when the API returns it.
@@ -252,7 +291,7 @@ function renderBar(segments) {
 function renderNeedsOk(waiting) {
   const ids = new Set(waiting.map((r) => r.event_id));
   for (const id of cards.keys()) if (!ids.has(id)) cards.delete(id);
-  const canAct = Boolean(token);
+  const canAct = role === "approver" || role === "admin";
   const nodes = waiting.map((r) => {
     const isBusy = busy.has(r.event_id);
     const card = cards.get(r.event_id);

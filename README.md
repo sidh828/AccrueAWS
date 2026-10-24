@@ -41,15 +41,23 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 
 # the live guard API (agent tools call /authorize, /inbound and /outbound;
 # the dashboard reads /events and /stream and approves through /override).
-# It prints the dashboard links. Keys, generated once and kept stable and
-# outside the database:
+# Set a different random bearer credential for each role before starting.
+# Credentials are kept outside the database:
 #   ACCRUE_WALL_KEY     keys the walls' stored code digests (32+ bytes); without
 #                       it, taint and received codes are forgotten on restart
 #   ACCRUE_LEDGER_KEY   keys the ledger's hash chain
-#   ACCRUE_DASHBOARD_TOKEN  the dashboard's secret for approving (else made up)
+#   ACCRUE_AGENT_TOKEN  permits /authorize, /inbound and /outbound
+#   ACCRUE_VIEWER_TOKEN permits dashboard and read-only API access
+#   ACCRUE_APPROVER_TOKEN permits dashboard reads and /override
+#   ACCRUE_ADMIN_TOKEN  optional; permits all API routes
+# ACCRUE_DASHBOARD_TOKEN remains a temporary alias for ACCRUE_APPROVER_TOKEN.
+# Each credential must be unique and at least 32 characters.
 #   ACCRUE_ALLOWED_CONTACTS comma-separated recipients /outbound always allows
-# Generate a key with: python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+# Generate one credential at a time with:
+#   python3 -c "import secrets; print(secrets.token_urlsafe(48))"
 .venv/bin/python -m guard.api --db ledger.db
+# The startup output includes separate viewer and approver dashboard links.
+# Use HTTPS or a trusted private network when binding beyond loopback.
 # Password-vault entries are still in memory and must be loaded at startup.
 
 # optional stand-in dashboard/API for a demo without the real guard:
