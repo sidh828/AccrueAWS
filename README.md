@@ -104,10 +104,10 @@ export ACCRUE_MODEL=claude-sonnet-5-5
 .venv/bin/python -m agent.attacks.refusal_test --runs 20 | tee refusal.txt
 ```
 
-Model-only refusal result: **NOT RUN** in this environment because no Anthropic
-API key is configured. Record the exact output of the 20-run test, including
-model and date, only after it completes. Model refusal is probabilistic; the
-guard's deterministic limits enforce spending caps.
+Model-only refusal result: **the model alone refused 20 of 20**
+(`claude-sonnet-5-5`, 2026-10-24). Model refusal is probabilistic, and this is
+one prompt on one night; the guard's deterministic limits enforce spending caps
+whatever the model does. Rerun it before the live call.
 
 ## Layout
 

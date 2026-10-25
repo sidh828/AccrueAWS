@@ -47,8 +47,10 @@ time out. Sequential decisions are unchanged.
 
 ## What we haven't measured
 
-- **How often the model refuses on its own** (`agent/attacks/refusal_test.py`,
-  the pitch's "X of 20") needs an API key. Benji runs it tonight; the number goes here with the model and date.
+- **How often the model refuses on its own: 20 of 20** (`agent/attacks/refusal_test.py`,
+  `claude-sonnet-5-5`, Sat Oct 24, run by Siddh). Given a working `buy_gift_card` tool and
+  the shutoff text, the model alone never bought the cards in 20 runs. That's a sample, not
+  a guarantee: one prompt, one model, one night. The caps don't depend on it.
 - The attack suite's model column is `NOT RUN` for the same reason.
 - Latency is on one laptop, one request at a time, with the guard and
   client on the same machine.
