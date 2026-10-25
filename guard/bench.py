@@ -44,9 +44,15 @@ def run(requests=1000):
     """Time `requests` decisions. Returns a dict of the results; times in ms."""
     token_key = secrets.token_bytes(32)
     agent_token = tokens.mint(token_key, "mom", agent="bills-agent", day_cents=50_000)
+    role_tokens = {
+        "agent": secrets.token_urlsafe(32),
+        "viewer": secrets.token_urlsafe(32),
+        "approver": secrets.token_urlsafe(32),
+    }
     with tempfile.TemporaryDirectory() as tmp:
-        server = api.make_server(str(Path(tmp) / "bench.db"), secrets.token_hex(16), port=0,
-                                 wall_key=secrets.token_bytes(32), token_key=token_key)
+        server = api.make_server(str(Path(tmp) / "bench.db"), port=0,
+                                 wall_key=secrets.token_bytes(32), token_key=token_key,
+                                 role_tokens=role_tokens)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         url = f"http://127.0.0.1:{server.server_address[1]}/authorize"
         timings = {"token": [], "no_token": []}
@@ -60,7 +66,8 @@ def run(requests=1000):
                 if kind == "token":
                     body["token"] = agent_token
                 req = urllib.request.Request(url, json.dumps(body).encode(),
-                                             {"Content-Type": "application/json"})
+                                             {"Content-Type": "application/json",
+                                              "Authorization": f"Bearer {role_tokens['agent']}"})
                 start = time.perf_counter_ns()
                 with urllib.request.urlopen(req) as resp:
                     decision = json.loads(resp.read())["decision"]
@@ -92,7 +99,8 @@ def main(argv=None):
         return
     print(f"{args.requests} decisions over HTTP, one at a time ({result['decisions']})")
     print(f"machine: {result['machine']}, Python {result['python']}, {result['cedar']}")
-    for kind, label in (("all", "all"), ("no_token", "without a token"), ("token", "with a token")):
+    for kind, label in (("all", "all"), ("no_token", "without delegation"),
+                        ("token", "with delegation")):
         s = result[kind]
         print(f"  {label:16} p50 {s['p50']:6.1f} ms   p95 {s['p95']:6.1f} ms   "
               f"p99 {s['p99']:6.1f} ms   max {s['max']:6.1f} ms   (n={s['n']})")

@@ -5,28 +5,37 @@ ledger and Cedar.
                              a signed delegation, guard/tokens.py)
     POST /inbound            agent -> walls: {session_id, source, content}
     POST /outbound           agent -> walls: {session_id, recipient, channel, content}
-    POST /override           dashboard only: {event_id, action: approve|deny}
-    POST /replay             dashboard only: {policy, since?} -> what a draft rule
+    POST /override           approver -> guard: {event_id, action: approve|deny}
+    POST /replay             approver -> guard: {policy, since?} -> what a draft rule
                              would have changed (guard/replay.py)
-    GET  /events?since=<id>  payments, oldest first (dashboard token)
-    GET  /stream             the same, live (token in the header or ?token=)
+    GET  /events?since=<id>  payments, oldest first (viewer/approver credential)
+    GET  /stream             the same, live (viewer/approver credential)
     GET  /verify             {ok, first_bad_event_id, first_bad_override_id, head}
                              (?anchor_id=&anchor_hash= checks a head kept elsewhere)
     GET  /limits             the spending limits, normal and after a scam flag
-    POST /demo/run           dashboard only, with --demo: {scenario} plays a scripted
+    POST /demo/run           approver only, with --demo: {scenario} plays a scripted
                              set of *requests* through the real guard (see DEMO)
     GET  /demo/status        {running, enabled}
+    GET  /whoami             authenticated role for the current bearer credential
     GET  /, /app.js          the dashboard, served from dashboard/
 
     python3 -m guard.api                    # prints the dashboard links
-    python3 -m guard.api --host 0.0.0.0     # reachable from a phone
+    python3 -m guard.api --host 0.0.0.0     # private network only; HTTP is unencrypted
 
-It behaves like dashboard/fake_api.py on purpose, so the dashboard switches
-from the stand-in to this without changes:
+It behaves like dashboard/fake_api.py on purpose, so the dashboard can switch
+from the stand-in to this without changing its data model:
 
-- /override needs `Authorization: Bearer <token>` and a JSON body, as in
-  #9. The token is ACCRUE_DASHBOARD_TOKEN, or made up at startup and
-  printed in the dashboard link. The agent never gets it.
+- Data routes require distinct environment-configured bearer credentials:
+  `ACCRUE_AGENT_TOKEN`, `ACCRUE_VIEWER_TOKEN` and `ACCRUE_APPROVER_TOKEN`.
+  `ACCRUE_ADMIN_TOKEN` is optional. Credentials must be unique and at least
+  32 characters; startup fails if required credentials are missing.
+  `ACCRUE_DASHBOARD_TOKEN` remains a temporary approver-token alias.
+- Agents can call `/authorize`, `/inbound` and `/outbound`. Viewers and
+  approvers can read; approvers can also call `/override`, `/replay` and
+  `/demo/run`. Admins can access every data route. Static dashboard files are
+  public so the browser can load before reading a token from its URL fragment.
+  `/verify` and `/limits` remain public as specified in the interface contract.
+
 - Rows are sent as payments, not ledger entries. The ledger never changes a
   row: approving a hold appends a row that resolves it. Sent as is, the
   dashboard would count an approved payment twice. So /events, /stream and
@@ -55,7 +64,6 @@ from datetime import datetime, timedelta, timezone
 import hmac
 import json
 import os
-import secrets
 import sqlite3
 import threading
 import time
@@ -109,6 +117,30 @@ MAX_BODY = 64_000  # bytes; /authorize is a few hundred, a /replay draft a whole
 MAX_STREAMS = 50  # live /stream connections at once
 TIMEOUT = 30  # seconds before a stalled connection is dropped
 STREAM_POLL = 1.0  # seconds between ledger checks when nothing woke a stream
+MIN_TOKEN_LENGTH = 32
+ROLE_PERMISSIONS = {
+    ("GET", "/whoami"): frozenset({"agent", "viewer", "approver", "admin"}),
+    ("GET", "/events"): frozenset({"viewer", "approver", "admin"}),
+    ("GET", "/stream"): frozenset({"viewer", "approver", "admin"}),
+    ("GET", "/limits"): frozenset({"viewer", "approver", "admin"}),
+    ("GET", "/demo/status"): frozenset({"viewer", "approver", "admin"}),
+    ("POST", "/authorize"): frozenset({"agent", "admin"}),
+    ("POST", "/inbound"): frozenset({"agent", "admin"}),
+    ("POST", "/outbound"): frozenset({"agent", "admin"}),
+    ("POST", "/override"): frozenset({"approver", "admin"}),
+    ("POST", "/replay"): frozenset({"approver", "admin"}),
+    ("POST", "/demo/run"): frozenset({"approver", "admin"}),
+}
+REQUIRED_ROLES = frozenset({"agent", "viewer", "approver"})
+ROLE_ENV_VARS = {
+    "agent": "ACCRUE_AGENT_TOKEN",
+    "viewer": "ACCRUE_VIEWER_TOKEN",
+    "approver": "ACCRUE_APPROVER_TOKEN (or ACCRUE_DASHBOARD_TOKEN)",
+}
+TOKEN_GENERATION_COMMAND = (
+    "python3 -c 'import secrets; print(secrets.token_urlsafe(24))'"
+)
+PUBLIC_GET_ROUTES = frozenset({"/limits", "/verify"})
 
 # The /authorize fields passed through to authorize.authorize_payment.
 REQUIRED = ("person", "chain", "tool", "amount_cents", "payee", "category", "session_id")
@@ -258,7 +290,7 @@ def limits():
 class Handler(BaseHTTPRequestHandler):
     # Set by make_server.
     db_path = None
-    token = None
+    role_tokens = None
     sessions = None  # walls.inbound.SessionStore: taint, shared with /inbound
     token_key = None  # verifies delegation tokens (guard/tokens.py)
     require_token = False
@@ -288,12 +320,13 @@ class Handler(BaseHTTPRequestHandler):
             if not path.is_file():
                 return self._json(404, {"error": "the dashboard isn't here"})
             return self._send(200, path.read_bytes(), content_type)
-        if url.path in ("/events", "/stream") and not self._from_dashboard(
-                query if url.path == "/stream" else None):
-            # Payments are Mom's private history: only the dashboard reads them.
-            # The browser's EventSource can't send headers, so /stream also
-            # takes the token as ?token=.
-            return self._json(401, {"error": "reading payments needs the dashboard's token"})
+        role = None
+        if url.path not in PUBLIC_GET_ROUTES:
+            role = self._authenticated_role("GET", url.path)
+            if role is None:
+                return
+        if url.path == "/whoami":
+            return self._json(200, {"role": role})
         if url.path == "/stream":
             return self._stream()
         if url.path == "/limits":
@@ -322,15 +355,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/authorize", "/override", "/inbound", "/outbound", "/replay",
-                        "/demo/run"):
+        if ("POST", path) not in ROLE_PERMISSIONS:
             return self._json(404, {"error": "not found"})
+        if self._authenticated_role("POST", path) is None:
+            return
         # JSON only: a web page can send a text/plain POST anywhere without
         # asking first. A JSON body makes the browser ask (CORS) first.
         if self.headers.get_content_type() != "application/json":
             return self._json(415, {"error": "the body must be JSON"})
-        if path in ("/override", "/replay", "/demo/run") and not self._from_dashboard():
-            return self._json(401, {"error": f"{path} needs the dashboard's token"})
         body = self._body()
         if body is None:
             return
@@ -345,6 +377,38 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/demo/run":
             return self._demo(body)
         return self._override(body)
+
+    def _authenticated_role(self, method, path):
+        allowed = ROLE_PERMISSIONS.get((method, path))
+        if allowed is None:
+            return self._auth_error(404, "not found")
+        scheme, separator, supplied = self.headers.get("Authorization", "").partition(" ")
+        if scheme.lower() != "bearer" or not separator or not supplied:
+            return self._auth_error(401, "a valid bearer credential is required")
+        role = None
+        supplied_bytes = supplied.encode("utf-8")
+        for candidate, expected in self.role_tokens.items():
+            if hmac.compare_digest(supplied_bytes, expected.encode("utf-8")):
+                role = candidate
+        if role is None:
+            return self._auth_error(401, "a valid bearer credential is required")
+        if role != "admin" and role not in allowed:
+            return self._auth_error(403, "this role cannot access the requested resource")
+        return role
+
+    def _auth_error(self, status, message):
+        body = json.dumps({"error": message}).encode()
+        self.close_connection = True
+        self.send_response(status)
+        if status == 401:
+            self.send_header("WWW-Authenticate", "Bearer")
+        self.send_header("Connection", "close")
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self._cors()
+        self.end_headers()
+        self.wfile.write(body)
+        return None
 
     def _authorize(self, body):
         status, response = answer_authorize(self._ledger, body, self.sessions,
@@ -502,19 +566,10 @@ class Handler(BaseHTTPRequestHandler):
         with self.changed:
             self.changed.notify_all()
 
-    def _from_dashboard(self, query=None):
-        """The dashboard's token, from the Authorization header or, where
-        `query` is given, a ?token= parameter."""
-        scheme, _, sent = self.headers.get("Authorization", "").partition(" ")
-        if scheme.lower() != "bearer" and query:
-            sent = query.get("token", [""])[0]
-        elif scheme.lower() != "bearer":
-            return False
-        return hmac.compare_digest(sent.encode(), self.token.encode())
-
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Headers",
+                         "Content-Type, Authorization, Last-Event-ID")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 
     def _json(self, code, data):
@@ -548,20 +603,20 @@ class _Connection:
         self.conn.close()
 
 
-def make_server(db_path, token, host="127.0.0.1", port=8000, wall_key=None,
+def make_server(db_path, token=None, host="127.0.0.1", port=8000, wall_key=None,
                 contacts=None, max_streams=MAX_STREAMS, token_key=None,
-                require_token=False, people=None, demo=False):
-    """A server for the ledger at `db_path`. `token` is the dashboard's
-    secret for /override. `wall_key` (32+ bytes) keys the walls' stored
+                require_token=False, people=None, demo=False, role_tokens=None):
+    """A server for the ledger at `db_path`. Role credentials come from
+    `role_tokens` or environment variables; `token` is a legacy approver alias.
+    `wall_key` (32+ bytes) keys the walls' stored
     digests of received codes; with it, taint and received codes are kept
     in the database and survive a restart, without it they live in memory.
     `contacts` are the recipients /outbound always allows. `token_key`
     verifies agents' delegation tokens; `require_token` refuses requests
     without one."""
+    role_tokens = _validated_role_tokens(role_tokens, token)
     if require_token and not token_key:
         raise ValueError("requiring tokens needs a token key")
-    if not token:
-        raise ValueError("the dashboard token can't be empty")
     storage = None
     if wall_key is not None:
         key = wall_key.encode() if isinstance(wall_key, str) else wall_key
@@ -582,7 +637,7 @@ def make_server(db_path, token, host="127.0.0.1", port=8000, wall_key=None,
         conn.execute("PRAGMA journal_mode=WAL")
     conn.close()
     handler = type("BoundHandler", (Handler,), {
-        "db_path": db_path, "token": token, "sessions": sessions,
+        "db_path": db_path, "role_tokens": role_tokens, "sessions": sessions,
         "token_key": token_key, "require_token": require_token,
         "people": None if people is None else {p.strip().lower() for p in people},
         "demo": {"enabled": demo, "running": False, "next": 0, "lock": threading.Lock()},
@@ -594,6 +649,44 @@ def make_server(db_path, token, host="127.0.0.1", port=8000, wall_key=None,
     return ThreadingHTTPServer((host, port), handler)
 
 
+def _validated_role_tokens(role_tokens, legacy_approver_token=None):
+    if role_tokens is None:
+        role_tokens = {
+            "agent": os.environ.get("ACCRUE_AGENT_TOKEN"),
+            "viewer": os.environ.get("ACCRUE_VIEWER_TOKEN"),
+            "approver": (os.environ.get("ACCRUE_APPROVER_TOKEN")
+                         or legacy_approver_token
+                         or os.environ.get("ACCRUE_DASHBOARD_TOKEN")),
+            "admin": os.environ.get("ACCRUE_ADMIN_TOKEN"),
+        }
+    if not isinstance(role_tokens, dict):
+        raise ValueError("role_tokens must map role names to bearer credentials")
+    if any(not isinstance(role, str) for role in role_tokens):
+        raise ValueError("role names must be strings")
+    unknown_roles = set(role_tokens) - {"agent", "viewer", "approver", "admin"}
+    if unknown_roles:
+        raise ValueError(f"unknown roles: {', '.join(sorted(unknown_roles))}")
+    configured = {role: value for role, value in role_tokens.items() if value is not None}
+    missing = REQUIRED_ROLES - configured.keys()
+    if missing:
+        variables = ", ".join(ROLE_ENV_VARS[role] for role in sorted(missing))
+        raise ValueError(
+            "missing required API credentials. Set "
+            + variables
+            + ". Generate each value with "
+            + TOKEN_GENERATION_COMMAND
+            + " (values must be unique and at least 32 characters)"
+        )
+    for role, value in configured.items():
+        if not isinstance(value, str) or len(value) < MIN_TOKEN_LENGTH:
+            raise ValueError(
+                f"the {role} credential must be at least {MIN_TOKEN_LENGTH} characters"
+            )
+    if len(set(configured.values())) != len(configured):
+        raise ValueError("each role must use a distinct bearer credential")
+    return configured
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="The guard's API; also serves the dashboard")
     parser.add_argument("--db", default="ledger.db", help="the ledger file (default ledger.db)")
@@ -603,23 +696,37 @@ def main(argv=None):
                         help="enable /demo/run: the video's scenarios, decided by the real guard")
     args = parser.parse_args(argv)
 
-    token = os.environ.get("ACCRUE_DASHBOARD_TOKEN") or secrets.token_urlsafe(24)
+    role_tokens = {
+        "agent": os.environ.get("ACCRUE_AGENT_TOKEN"),
+        "viewer": os.environ.get("ACCRUE_VIEWER_TOKEN"),
+        "approver": (os.environ.get("ACCRUE_APPROVER_TOKEN")
+                     or os.environ.get("ACCRUE_DASHBOARD_TOKEN")),
+        "admin": os.environ.get("ACCRUE_ADMIN_TOKEN"),
+    }
     wall_key = os.environ.get("ACCRUE_WALL_KEY")
     contacts = {c.strip() for c in os.environ.get("ACCRUE_ALLOWED_CONTACTS", "").split(",")
                 if c.strip()}
     token_key = os.environ.get("ACCRUE_TOKEN_KEY")
     require_token = os.environ.get("ACCRUE_REQUIRE_TOKENS") == "1"
     people = [p for p in os.environ.get("ACCRUE_PEOPLE", "").split(",") if p.strip()] or None
-    server = make_server(args.db, token, args.host, args.port, wall_key=wall_key,
-                         contacts=contacts, token_key=token_key, require_token=require_token,
+    try:
+        role_tokens = _validated_role_tokens(role_tokens)
+    except ValueError as err:
+        parser.error(str(err))
+    server = make_server(args.db, host=args.host, port=args.port, wall_key=wall_key,
+                         contacts=contacts, role_tokens=role_tokens, token_key=token_key,
+                         require_token=require_token,
                          people=people, demo=args.demo)
     base = f"http://{args.host}:{args.port}/"
     print(f"guard API on {base}  (ledger: {args.db})")
-    print(f"dashboard:  {base}#token={token}")
-    print("(open it once on each device that should see payments and approve them)")
+    print(f"dashboard, can approve:  {base}#token={role_tokens['approver']}")
+    print(f"dashboard, read-only:    {base}#token={role_tokens['viewer']}")
+    print("(open the appropriate link once on each device that needs dashboard access)")
     if react_file("/") is None:
-        print("note: the React dashboard isn't built, so the link opens the plain one. Build it:\n"
+        print("note: the React dashboard isn't built, so the links open the plain page. Build it:\n"
               "  cd dashboard/react-frontend && npm ci && npm run build")
+    if role_tokens.get("admin"):
+        print("admin bearer credential configured; do not share it with the browser")
     if not os.environ.get("ACCRUE_LEDGER_KEY"):
         print("note: ACCRUE_LEDGER_KEY isn't set, so the ledger is hashed without a key")
     if not people and not require_token:
@@ -632,7 +739,7 @@ def main(argv=None):
     if not wall_key:
         print("note: ACCRUE_WALL_KEY isn't set, so taint and received codes are kept in "
               "memory and forgotten on restart")
-    print("(open the first link once on each device that should approve; Ctrl-C to stop)",
+    print("(open each dashboard link on the matching device; Ctrl-C to stop)",
           flush=True)
     try:
         server.serve_forever()

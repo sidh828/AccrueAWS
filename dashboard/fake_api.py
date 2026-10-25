@@ -18,8 +18,8 @@ Approving needs the dashboard's token, the same rule the real guard
 follows: POST /override must send `Authorization: Bearer <token>`. The token
 comes from ACCRUE_DASHBOARD_TOKEN, or is made up at startup, and the printed
 link carries it as #token=... for the dashboard to pick up. The agent never
-gets it. Reading /events and /stream needs it too (/stream also takes
-?token=, since EventSource can't send headers).
+gets it. Reading /events and /stream needs it too; credentials are sent only
+in the Authorization header.
 
 Nothing here is real: no Cedar, no money, and the hashes chain only
 within this process.
@@ -162,8 +162,7 @@ class Handler(BaseHTTPRequestHandler):
         if url.path in STATIC:
             name, content_type = STATIC[url.path]
             return self._send(200, (HERE / name).read_bytes(), content_type)
-        if url.path in ("/events", "/stream") and not self._from_dashboard(
-                parse_qs(url.query) if url.path == "/stream" else None):
+        if url.path in ("/events", "/stream") and not self._from_dashboard():
             # Same rule as guard/api.py: payments are only the dashboard's to read.
             return self._json(401, {"error": "reading payments needs the dashboard's token"})
         if url.path == "/events":
@@ -320,17 +319,16 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             self.streams.release()
 
-    def _from_dashboard(self, query=None):
+    def _from_dashboard(self):
         scheme, _, sent = self.headers.get("Authorization", "").partition(" ")
-        if scheme.lower() != "bearer" and query:
-            sent = query.get("token", [""])[0]
-        elif scheme.lower() != "bearer":
+        if scheme.lower() != "bearer":
             return False
         return hmac.compare_digest(sent.encode(), self.token.encode())
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Headers",
+                         "Content-Type, Authorization, Last-Event-ID")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 
     def _json(self, code, data):

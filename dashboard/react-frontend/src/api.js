@@ -28,6 +28,9 @@ function getDashboardToken() {
 }
 
 const dashboardToken = getDashboardToken();
+const authHeaders = () => dashboardToken
+  ? { Authorization: `Bearer ${dashboardToken}` }
+  : {};
 
 // Payment history is only the dashboard's to read, so reads carry its token.
 const NEEDS_LINK = "This screen can't show payments. Open the dashboard using its authorized link.";
@@ -35,7 +38,7 @@ const NEEDS_LINK = "This screen can't show payments. Open the dashboard using it
 async function getSnapshot() {
   const response = await fetch(`${API}/events?since=0`, {
     cache: 'no-store',
-    headers: dashboardToken ? { Authorization: `Bearer ${dashboardToken}` } : {},
+    headers: authHeaders(),
   });
   if (response.status === 401) throw new Error(NEEDS_LINK);
   if (!response.ok) throw new Error(`Couldn't load activity (HTTP ${response.status})`);
@@ -44,8 +47,39 @@ async function getSnapshot() {
   return rows;
 }
 
-// Full snapshots are important: /events?since=lastId does not expose updates to older IDs.
-// /stream sends changed rows, including an override that changes an old ID.
+async function readEventStream(lastEventId, onEvent, onConnected, signal) {
+  const response = await fetch(`${API}/stream`, {
+    cache: 'no-store',
+    headers: { ...authHeaders(), 'Last-Event-ID': String(lastEventId) },
+    signal,
+  });
+  if (response.status === 401) throw new Error(NEEDS_LINK);
+  if (!response.ok) throw new Error(`Live updates unavailable (HTTP ${response.status})`);
+  if (!response.body) throw new Error('Live updates are not supported by this browser');
+  onConnected();
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    let boundary;
+    while ((boundary = buffer.search(/\r?\n\r?\n/)) !== -1) {
+      const separator = buffer.slice(boundary).match(/^\r?\n\r?\n/)[0];
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + separator.length);
+      const data = block.split(/\r?\n/)
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).replace(/^ /, ''))
+        .join('\n');
+      if (data) onEvent(JSON.parse(data));
+    }
+    if (done) return;
+  }
+}
+
+// Full snapshots expose updates to older IDs, such as a decision resolving a hold.
 export function useGuardEvents() {
   const [rowsById, setRowsById] = useState({});
   const [connection, setConnection] = useState('connecting');
@@ -53,6 +87,7 @@ export function useGuardEvents() {
   const [busyId, setBusyId] = useState(null);
   const [demoBusy, setDemoBusy] = useState(null);
   const [limits, setLimits] = useState(null); // GET /limits; null until it answers
+  const [role, setRole] = useState(null);
   const alive = useRef(true);
 
   const mergeEvent = useCallback((event) => {
@@ -71,69 +106,86 @@ export function useGuardEvents() {
 
   useEffect(() => {
     alive.current = true;
-    let source = null;
-    let pollingTimer = null;
-    let pollBusy = false;
     let disposed = false;
+    const controller = new AbortController();
 
     async function pollOnce() {
-      if (pollBusy || disposed) return;
-      pollBusy = true;
       try {
         await refresh();
         if (!disposed) setConnection('polling');
-      } catch {
-        if (!disposed) setConnection('offline');
-      } finally {
-        pollBusy = false;
-      }
-    }
-
-    function beginPolling() {
-      if (pollingTimer || disposed) return;
-      if (source) source.close();
-      setConnection('polling');
-      pollOnce();
-      pollingTimer = window.setInterval(pollOnce, 1800);
-    }
-
-    async function start() {
-      try {
-        await refresh();
       } catch (reason) {
         if (!disposed) {
           setConnection('offline');
           if (reason.message === NEEDS_LINK) setError(NEEDS_LINK);
         }
       }
-      if (disposed) return;
+    }
 
-      // EventSource is a one-way read connection; approve/deny uses POST.
-      // Fail over after the first SSE error, including a missing /stream endpoint.
-      // EventSource can't send headers, so the token rides in the URL.
-      source = new EventSource(`${API}/stream?token=${encodeURIComponent(dashboardToken)}`);
-      source.onopen = () => { if (!disposed) setConnection('live'); };
-      source.onmessage = (message) => {
-        try { mergeEvent(JSON.parse(message.data)); } catch { /* Ignore invalid messages */ }
-      };
-      source.onerror = () => beginPolling();
+    async function start() {
+      let lastEventId = 0;
+      try {
+        const identityResponse = await fetch(`${API}/whoami`, {
+          cache: 'no-store',
+          headers: authHeaders(),
+        });
+        let currentRole;
+        if (identityResponse.status === 404) {
+          currentRole = dashboardToken ? 'approver' : 'viewer';
+        } else {
+          if (!identityResponse.ok) {
+            throw new Error(`Dashboard access denied (HTTP ${identityResponse.status})`);
+          }
+          currentRole = (await identityResponse.json()).role;
+        }
+        if (!disposed) setRole(currentRole);
+        const snapshot = await refresh();
+        lastEventId = snapshot.reduce(
+          (maxId, event) => Math.max(maxId, event.event_id), 0
+        );
+      } catch (reason) {
+        if (!disposed) {
+          setError(reason.message || 'Dashboard access failed');
+          setConnection('offline');
+        }
+        return;
+      }
+
+      while (!disposed) {
+        try {
+          await readEventStream(
+            lastEventId,
+            (event) => {
+              mergeEvent(event);
+              lastEventId = Math.max(lastEventId, event.event_id);
+            },
+            () => { if (!disposed) setConnection('live'); },
+            controller.signal,
+          );
+          if (!disposed) throw new Error('Live connection closed');
+        } catch (reason) {
+          if (disposed || reason.name === 'AbortError') return;
+          if (reason.message === NEEDS_LINK) setError(NEEDS_LINK);
+          setConnection('polling');
+          await pollOnce();
+          await new Promise((resolve) => window.setTimeout(resolve, 1800));
+        }
+      }
     }
 
     start();
-    fetch(`${API}/limits`, { cache: 'no-store' })
+    fetch(`${API}/limits`, { cache: 'no-store', headers: authHeaders() })
       .then((response) => (response.ok ? response.json() : null))
       .then((body) => { if (!disposed && body) setLimits(body); })
       .catch(() => { /* keep the fallback limits */ });
     return () => {
       disposed = true;
       alive.current = false;
-      if (source) source.close();
-      if (pollingTimer) window.clearInterval(pollingTimer);
+      controller.abort();
     };
   }, [refresh, mergeEvent]);
 
   async function override(event, action) {
-    if (event.status !== 'held' || busyId !== null) return;
+    if (!['approver', 'admin'].includes(role) || event.status !== 'held' || busyId !== null) return;
     setBusyId(event.event_id);
     setError('');
     try {
@@ -173,7 +225,7 @@ export function useGuardEvents() {
   }
   
   async function runDemo(scenario) {
-    if (!dashboardToken) {
+    if (!['approver', 'admin'].includes(role)) {
       setError('Dashboard authorization is required to run simulations.');
       return false;
     }
@@ -208,7 +260,9 @@ export function useGuardEvents() {
   }
 
   const events = Object.values(rowsById).sort((a, b) => a.event_id - b.event_id);
-  return {events, connection, error, busyId, override, runDemo, demoBusy,canRunDemo: Boolean(dashboardToken), limits };
+  const canApprove = ['approver', 'admin'].includes(role);
+  return {events, connection, error, busyId, override, runDemo, demoBusy,
+    canApprove, canRunDemo: canApprove, limits };
 }
 
 const ANCHOR_KEY = 'accrue_record_anchor';
@@ -232,7 +286,10 @@ export function useVerify(activityKey) {
         ? `?anchor_id=${anchor.event_id}&anchor_hash=${encodeURIComponent(anchor.row_hash)}`
         : '';
       try {
-        const response = await fetch(`${API}/verify${query}`, { cache: 'no-store' });
+        const response = await fetch(`${API}/verify${query}`, {
+          cache: 'no-store',
+          headers: authHeaders(),
+        });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const body = await response.json();
         if (disposed) return;

@@ -38,16 +38,21 @@ class LedgerGuard:
         self._fault: str | None = None
         self._directory = tempfile.TemporaryDirectory(prefix="accrue-attack-")
         self.database_path = str(Path(self._directory.name) / "ledger.db")
+        self.role_tokens = {
+            "agent": secrets.token_urlsafe(48),
+            "viewer": secrets.token_urlsafe(48),
+            "approver": secrets.token_urlsafe(48),
+        }
         self.server = api.make_server(
             self.database_path,
-            "attack-suite-dashboard-token",
             port=0,
             wall_key=secrets.token_bytes(32),
+            role_tokens=self.role_tokens,
         )
         self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
         self._server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self._server_thread.start()
-        self.client = HttpGuard(self.base_url, timeout=30)
+        self.client = HttpGuard(self.base_url, timeout=30, token=self.role_tokens["agent"])
         with self._cedar_lock:
             authorize.CEDAR_BIN = self.cedar_path
 

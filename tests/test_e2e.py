@@ -24,7 +24,14 @@ from guard.local import LocalGuard
 
 pytestmark = pytest.mark.cedar
 
-TOKEN = "e2e-dashboard-token"
+AGENT_TOKEN = "agent-" + "a" * 40
+VIEWER_TOKEN = "viewer-" + "v" * 40
+APPROVER_TOKEN = "approver-" + "p" * 40
+ROLE_TOKENS = {
+    "agent": AGENT_TOKEN,
+    "viewer": VIEWER_TOKEN,
+    "approver": APPROVER_TOKEN,
+}
 
 
 @pytest.fixture
@@ -86,7 +93,7 @@ def test_a_ledger_row_edited_by_hand_is_named():
 
 @pytest.fixture
 def server(tmp_path):
-    srv = api.make_server(str(tmp_path / "ledger.db"), TOKEN, port=0,
+    srv = api.make_server(str(tmp_path / "ledger.db"), port=0, role_tokens=ROLE_TOKENS,
                           wall_key=b"e2e-wall-key-" * 3, contacts={"daughter@example.com"})
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{srv.server_address[1]}"
@@ -95,12 +102,13 @@ def server(tmp_path):
 
 
 def get(base, path):
-    request = urllib.request.Request(base + path, headers={"Authorization": f"Bearer {TOKEN}"})
-    with urllib.request.urlopen(request, timeout=10) as r:
+    req = urllib.request.Request(base + path, headers={
+        "Authorization": f"Bearer {VIEWER_TOKEN}"})
+    with urllib.request.urlopen(req, timeout=10) as r:
         return json.loads(r.read())
 
 
-def override(base, event_id, action, token=TOKEN):
+def override(base, event_id, action, token=APPROVER_TOKEN):
     req = urllib.request.Request(base + "/override", json.dumps(
         {"event_id": event_id, "action": action}).encode(),
         {"Content-Type": "application/json", "Authorization": f"Bearer {token}"})
@@ -113,7 +121,7 @@ def test_the_scam_beat_from_the_video_through_the_running_api(server):
     scam text taints the session, the gift cards and the Zelle switch are
     stopped, the code Margaret was texted can't be sent out, the daughter
     settles it from the dashboard, and the ledger still verifies."""
-    tools = ToolBox(HttpGuard(server), session_id="margaret-1")
+    tools = ToolBox(HttpGuard(server, token=AGENT_TOKEN), session_id="margaret-1")
 
     # Normal life just works.
     assert tools.pay_bill("ohio-power.example", 12_000, "power bill")["ok"]

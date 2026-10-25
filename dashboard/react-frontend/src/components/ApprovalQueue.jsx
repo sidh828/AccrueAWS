@@ -1,7 +1,7 @@
 import { Clock3, ShieldAlert } from 'lucide-react';
 import { chainForEvent, explanationForEvent, labelForEvent, money } from '../format.js';
 
-export default function ApprovalQueue({ waiting, processing, busyId, onOverride }) {
+export default function ApprovalQueue({ waiting, processing, busyId, onOverride, canApprove }) {
   return (
     <section className="panel approvals" aria-label="Payments awaiting approval">
       <div className="section-header">
@@ -22,14 +22,14 @@ export default function ApprovalQueue({ waiting, processing, busyId, onOverride 
             <div className="approval-payee">To {event.payee}</div>
           </div>
           <div className="approval-reason">{explanationForEvent(event)}<span className="muted small">Requested by {chainForEvent(event)}</span></div>
-          <div className="approval-buttons">
+          {canApprove ? <div className="approval-buttons">
             <button type="button" className="btn btn-outline" disabled={busyId !== null}
               onClick={() => onOverride(event, 'deny')}>Deny</button>
             <button type="button" className="btn btn-primary" disabled={busyId !== null}
               onClick={() => {
                 if (window.confirm(`Approve ${money(event.amount_cents)} to ${event.payee}? This sends an override to the guard.`)) onOverride(event, 'approve');
               }}>{busyId === event.event_id ? 'Submitting…' : 'Approve'}</button>
-          </div>
+          </div> : <p className="muted small">Open the approver dashboard link to approve or deny.</p>}
         </div>
       ))}
       {processing.map((event) => (

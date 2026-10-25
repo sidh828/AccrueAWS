@@ -122,8 +122,14 @@ def test_rows_logged_before_newer_fields_still_replay():
         "summary": {"newly_stopped": 0, "newly_held": 0, "newly_allowed": 0}}
 
 
-def test_over_http_replay_needs_the_dashboard_token(september):
-    server = api.make_server(september, "dash-token", port=0)
+def test_over_http_replay_needs_the_approver_credential(september):
+    approver_token = "approver-" + "p" * 40
+    role_tokens = {
+        "agent": "agent-" + "a" * 40,
+        "viewer": "viewer-" + "v" * 40,
+        "approver": approver_token,
+    }
+    server = api.make_server(september, port=0, role_tokens=role_tokens)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
 
@@ -140,9 +146,9 @@ def test_over_http_replay_needs_the_dashboard_token(september):
 
     try:
         assert post({"policy": LIVE})[0] == 401
-        status, result = post({"policy": LIVE, "since": SEPTEMBER}, token="dash-token")
+        status, result = post({"policy": LIVE, "since": SEPTEMBER}, token=approver_token)
         assert status == 200 and result["changes"] == []
-        status, err = post({"policy": "nonsense", "since": SEPTEMBER}, token="dash-token")
+        status, err = post({"policy": "nonsense", "since": SEPTEMBER}, token=approver_token)
         assert status == 400 and "isn't valid" in err["error"]
     finally:
         server.shutdown()

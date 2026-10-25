@@ -18,7 +18,17 @@ from guard import api, ledger
 
 pytestmark = pytest.mark.cedar
 
-TOKEN = "test-dashboard-token"
+AGENT_TOKEN = "agent-" + "a" * 40
+VIEWER_TOKEN = "viewer-" + "v" * 40
+APPROVER_TOKEN = "approver-" + "p" * 40
+ADMIN_TOKEN = "admin-" + "d" * 40
+ROLE_TOKENS = {
+    "agent": AGENT_TOKEN,
+    "viewer": VIEWER_TOKEN,
+    "approver": APPROVER_TOKEN,
+    "admin": ADMIN_TOKEN,
+}
+AUTO_TOKEN = object()
 WALL_KEY = b"test-wall-key-" * 3
 CONTRACT_FIELDS = {
     "event_id", "ts", "status", "person", "chain", "tool", "amount_cents", "payee",
@@ -27,7 +37,7 @@ CONTRACT_FIELDS = {
 
 
 def start(db_path, **kwargs):
-    server = api.make_server(db_path, TOKEN, port=0, wall_key=WALL_KEY,
+    server = api.make_server(db_path, port=0, wall_key=WALL_KEY, role_tokens=ROLE_TOKENS,
                              contacts={"daughter@example.com"}, **kwargs)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, {"base": f"http://127.0.0.1:{server.server_address[1]}", "db": db_path,
@@ -42,14 +52,14 @@ def guard(tmp_path):
     server.server_close()
 
 
-def call(guard, method, path, body=None, token=None, content_type="application/json"):
+def call(guard, method, path, body=None, token=AUTO_TOKEN, content_type="application/json"):
     data = None if body is None else (
         body if isinstance(body, bytes) else json.dumps(body).encode())
-    if token is None and method == "GET":
-        token = TOKEN  # reads are the dashboard's; pass token="" to read without one
     request = urllib.request.Request(guard["base"] + path, data=data, method=method)
     if data is not None:
         request.add_header("Content-Type", content_type)
+    if token is AUTO_TOKEN:
+        token = (APPROVER_TOKEN if path == "/override" else AGENT_TOKEN) if method == "POST" else VIEWER_TOKEN
     if token:
         request.add_header("Authorization", f"Bearer {token}")
     try:
@@ -131,15 +141,15 @@ def test_a_request_can_taint_itself_but_never_untaint(guard):
     assert body["decision"] == "hold"
 
 
-def test_override_needs_the_dashboards_token_and_json(guard):
+def test_override_needs_the_approver_credential_and_json(guard):
     known_payee(guard)
     _, held = pay(guard, 5_000, "zelle:new-contact", "transfer", tainted=True)
     assert held["decision"] == "hold"
     approve = {"event_id": held["event_id"], "action": "approve"}
 
-    assert call(guard, "POST", "/override", approve)[0] == 401
+    assert call(guard, "POST", "/override", approve, token=None)[0] == 401
     assert call(guard, "POST", "/override", approve, token="wrong")[0] == 401
-    assert call(guard, "POST", "/override", json.dumps(approve).encode(), token=TOKEN,
+    assert call(guard, "POST", "/override", json.dumps(approve).encode(), token=APPROVER_TOKEN,
                 content_type="text/plain")[0] == 415
     # Still waiting after all of that.
     _, rows = call(guard, "GET", "/events")
@@ -153,7 +163,7 @@ def test_an_approval_settles_the_payment_it_resolves(guard):
     known_payee(guard)
     _, held = pay(guard, 5_000, "zelle:new-contact", "transfer", tainted=True)
     status, view = call(guard, "POST", "/override",
-                        {"event_id": held["event_id"], "action": "approve"}, token=TOKEN)
+                        {"event_id": held["event_id"], "action": "approve"}, token=APPROVER_TOKEN)
     assert status == 200
     assert view["event_id"] == held["event_id"]
     assert (view["decision"], view["status"], view["rule"]) == (
@@ -173,9 +183,50 @@ def test_an_approval_settles_the_payment_it_resolves(guard):
     assert pay(guard, 1)[1]["rule"] == "daily_cap_needs_approval"
 
     assert call(guard, "POST", "/override",
-                {"event_id": held["event_id"], "action": "deny"}, token=TOKEN)[0] == 409
+                {"event_id": held["event_id"], "action": "deny"}, token=APPROVER_TOKEN)[0] == 409
     assert call(guard, "POST", "/override",
-                {"event_id": 999, "action": "deny"}, token=TOKEN)[0] == 404
+                {"event_id": 999, "action": "deny"}, token=APPROVER_TOKEN)[0] == 404
+
+
+def test_api_routes_are_scoped_to_their_roles(guard):
+    assert call(guard, "GET", "/events", token=None)[0] == 401
+    assert call(guard, "POST", "/authorize", {}, token=None)[0] == 401
+    assert call(guard, "GET", "/whoami", token=AGENT_TOKEN) == (200, {"role": "agent"})
+    assert call(guard, "GET", "/events", token=AGENT_TOKEN)[0] == 403
+    assert call(guard, "POST", "/override", {}, token=AGENT_TOKEN)[0] == 403
+    assert call(guard, "POST", "/override", {}, token=VIEWER_TOKEN)[0] == 403
+    assert call(guard, "POST", "/authorize", {}, token=VIEWER_TOKEN)[0] == 403
+    assert call(guard, "POST", "/inbound", {
+        "session_id": "wrong-role", "source": "sms", "content": "hello",
+    }, token=VIEWER_TOKEN)[0] == 403
+    assert call(guard, "GET", "/events")[0] == 200
+
+
+def test_admin_can_access_data_routes(guard):
+    assert call(guard, "GET", "/whoami", token=ADMIN_TOKEN) == (200, {"role": "admin"})
+    assert call(guard, "GET", "/events", token=ADMIN_TOKEN)[0] == 200
+    assert call(guard, "POST", "/inbound", {
+        "session_id": "admin-role", "source": "sms", "content": "hello",
+    }, token=ADMIN_TOKEN)[0] == 200
+
+
+@pytest.mark.parametrize("role_tokens", [
+    {"viewer": VIEWER_TOKEN, "approver": APPROVER_TOKEN},
+    {"agent": "short", "viewer": VIEWER_TOKEN, "approver": APPROVER_TOKEN},
+    {"agent": AGENT_TOKEN, "viewer": VIEWER_TOKEN, "approver": VIEWER_TOKEN},
+])
+def test_role_credentials_must_be_complete_strong_and_distinct(tmp_path, role_tokens):
+    with pytest.raises(ValueError):
+        api.make_server(str(tmp_path / "invalid.db"), role_tokens=role_tokens)
+
+
+def test_static_dashboard_and_cors_preflight_remain_available(guard):
+    request = urllib.request.Request(guard["base"] + "/", method="GET")
+    with urllib.request.urlopen(request, timeout=10) as response:
+        assert response.status == 200
+    request = urllib.request.Request(guard["base"] + "/override", method="OPTIONS")
+    with urllib.request.urlopen(request, timeout=10) as response:
+        assert response.status == 204
 
 
 def test_a_broken_rules_engine_holds(guard, monkeypatch, tmp_path):
@@ -188,7 +239,7 @@ def test_a_broken_rules_engine_holds(guard, monkeypatch, tmp_path):
 
 
 def test_a_broken_ledger_answers_hold_not_allow(tmp_path):
-    server = api.make_server(str(tmp_path / "ledger.db"), TOKEN, port=0)
+    server = api.make_server(str(tmp_path / "ledger.db"), port=0, role_tokens=ROLE_TOKENS)
     server.RequestHandlerClass.db_path = str(tmp_path / "missing-dir" / "ledger.db")
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
@@ -206,7 +257,8 @@ def test_the_stream_sends_new_payments_and_settled_ones(guard):
     known_payee(guard)
     host, port = guard["base"].removeprefix("http://").split(":")
     stream = http.client.HTTPConnection(host, int(port), timeout=10)
-    stream.request("GET", f"/stream?token={TOKEN}", headers={"Last-Event-ID": "1"})
+    stream.request("GET", "/stream", headers={
+        "Last-Event-ID": "1", "Authorization": f"Bearer {VIEWER_TOKEN}"})
     response = stream.getresponse()
     assert response.status == 200
     assert response.getheader("Content-Type") == "text/event-stream"
@@ -225,7 +277,8 @@ def test_the_stream_sends_new_payments_and_settled_ones(guard):
     assert event[0] == f"id: {held['event_id']}"
     assert json.loads(event[1].removeprefix("data: "))["status"] == "held"
 
-    call(guard, "POST", "/override", {"event_id": held["event_id"], "action": "deny"}, token=TOKEN)
+    call(guard, "POST", "/override", {"event_id": held["event_id"], "action": "deny"},
+         token=APPROVER_TOKEN)
     event = next_event()
     assert len(event) == 1  # no id line: an old payment, settled
     settled = json.loads(event[0].removeprefix("data: "))
@@ -364,7 +417,8 @@ def test_taint_and_received_codes_survive_a_restart(tmp_path):
 
 def test_a_short_wall_key_is_refused(tmp_path):
     with pytest.raises(ValueError, match="32 bytes"):
-        api.make_server(str(tmp_path / "ledger.db"), TOKEN, port=0, wall_key="too-short")
+        api.make_server(str(tmp_path / "ledger.db"), port=0, role_tokens=ROLE_TOKENS,
+                        wall_key="too-short")
 
 
 def test_the_agents_bill_category_reaches_the_guard(guard):
@@ -381,7 +435,7 @@ def test_the_agents_bill_category_reaches_the_guard(guard):
         "pay", "aep-ohio.example", 11_000, "ALLOW", scope_id="mom/bills-agent",
         payee="aep-ohio.example", category="utility")
     conn.commit()
-    tools = ToolBox(HttpGuard(guard["base"]), session_id="sess-bills")
+    tools = ToolBox(HttpGuard(guard["base"], token=AGENT_TOKEN), session_id="sess-bills")
     result = tools.pay_bill("aep-ohio.example", 12_000, "power bill", category="utility")
     assert result["ok"] and result["totals"]["day"] == 0
     [row] = call(guard, "GET", "/events?since=1")[1]
@@ -426,10 +480,12 @@ def test_the_demo_is_decided_by_the_real_guard(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "DEMO_STEP_SECONDS", 0)
     server, g = start(str(tmp_path / "ledger.db"), demo=True)
     try:
-        assert call(g, "POST", "/demo/run", {"scenario": "normal_day"})[0] == 401
-        assert call(g, "POST", "/demo/run", {"scenario": "held_bill"}, token=TOKEN)[0] == 409
+        assert call(g, "POST", "/demo/run", {"scenario": "normal_day"}, token=None)[0] == 401
+        assert call(g, "POST", "/demo/run", {"scenario": "held_bill"},
+                    token=APPROVER_TOKEN)[0] == 409
         for scenario in api.DEMO_ORDER:
-            assert call(g, "POST", "/demo/run", {"scenario": scenario}, token=TOKEN) == (
+            assert call(g, "POST", "/demo/run", {"scenario": scenario},
+                        token=APPROVER_TOKEN) == (
                 202, {"started": scenario})
             for _ in range(100):
                 if not call(g, "GET", "/demo/status")[1]["running"]:
@@ -452,13 +508,11 @@ def test_the_demo_is_decided_by_the_real_guard(tmp_path, monkeypatch):
         server.server_close()
 
 
-def test_payment_history_is_the_dashboards_to_read(guard):
-    """Dharvik's review: /events and /stream were readable by anything that
-    could reach the guard. They're Mom's private history, so they need the
-    dashboard's token like /override; /stream also takes it as ?token=,
-    because the browser's EventSource can't send headers."""
+def test_payment_history_requires_a_viewer_role(guard):
+    """Payment history and verification data require a dashboard read role.
+    Credentials in query parameters never authorize a request."""
     known_payee(guard)
-    for token in ["", "wrong", TOKEN.upper()]:
+    for token in ["", "wrong", VIEWER_TOKEN.upper()]:
         assert call(guard, "GET", "/events", token=token)[0] == 401
     status, rows = call(guard, "GET", "/events")
     assert status == 200 and rows
@@ -467,15 +521,14 @@ def test_payment_history_is_the_dashboards_to_read(guard):
     for path, headers, expected in [
         ("/stream", {}, 401),
         ("/stream?token=wrong", {}, 401),
-        ("/stream", {"Authorization": f"Bearer {TOKEN}"}, 200),
-        (f"/stream?token={TOKEN}", {}, 200),
+        ("/stream?token=" + VIEWER_TOKEN, {}, 401),
+        ("/stream", {"Authorization": f"Bearer {VIEWER_TOKEN}"}, 200),
     ]:
         conn = http.client.HTTPConnection(host, int(port), timeout=10)
         conn.request("GET", path, headers=headers)
         assert conn.getresponse().status == expected, path
         conn.close()
 
-    # The record check and the limits stay public: no payment details.
     assert call(guard, "GET", "/verify", token="")[0] == 200
     assert call(guard, "GET", "/limits", token="")[0] == 200
 

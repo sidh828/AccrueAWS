@@ -13,6 +13,7 @@ Two guard clients share one interface:
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import urllib.request
@@ -261,12 +262,17 @@ class FakeGuard:
 class HttpGuard:
     """Real guard over HTTP. Any network or parse error becomes hold/block (fail closed)."""
 
-    def __init__(self, base_url: str = "http://127.0.0.1:8000", timeout: float = 5.0):
+    def __init__(self, base_url: str = "http://127.0.0.1:8000", timeout: float = 5.0,
+                 token: str | None = None):
         self.base, self.timeout = base_url.rstrip("/"), timeout
+        self.token = token if token is not None else os.environ.get("ACCRUE_AGENT_TOKEN")
 
     def _post(self, path: str, body: dict) -> dict:
+        headers = {"Content-Type": "application/json"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
         req = urllib.request.Request(
-            self.base + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"}
+            self.base + path, data=json.dumps(body).encode(), headers=headers
         )
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
             return json.loads(r.read())

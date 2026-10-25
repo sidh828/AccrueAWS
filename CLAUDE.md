@@ -101,24 +101,33 @@ Response (`totals` include this request; `limits` are the column that applied):
 - `token` (guard/tokens.py): a signed delegation. With one, the chain comes
   from the token and the request's is ignored; forged, altered or expired is
   a 401. `ACCRUE_REQUIRE_TOKENS=1` refuses requests without one.
+- **HTTP role credentials are separate from delegation tokens.** The API
+  requires distinct bearer credentials of at least 32 characters:
+  `ACCRUE_AGENT_TOKEN`, `ACCRUE_VIEWER_TOKEN`, and
+  `ACCRUE_APPROVER_TOKEN`. `ACCRUE_ADMIN_TOKEN` is optional and grants all
+  authenticated API roles. `ACCRUE_DASHBOARD_TOKEN` is a temporary alias for
+  the approver credential. Generate values with
+  `python3 -c 'import secrets; print(secrets.token_urlsafe(24))'`.
+- `POST /authorize`, `/inbound` and `/outbound`: agent or admin bearer
+  credential. The agent bearer authenticates the client to the HTTP API; it
+  does not replace the signed delegation `token` in `/authorize`.
 - `GET /events?since=<id>` and `GET /stream` (server-sent events): payments
-  ordered by `event_id`. Dashboard only: they need the dashboard token, in
-  `Authorization: Bearer` or, for `/stream` (EventSource can't send headers),
-  as `?token=`; otherwise 401. `/verify` and `/limits` stay open.
-- `POST /override {event_id, action: approve|deny}`: dashboard only. It needs
-  `Authorization: Bearer <dashboard token>` and a JSON body, or it gets 401
-  or 415. The guard reads the token from `ACCRUE_DASHBOARD_TOKEN`, or makes
-  one up and prints the dashboard link `…/#token=<token>`. The agent's process
-  never has it, and phone alerts never carry it. An approval goes through
-  even past a limit - the family is the override.
-- `GET /verify[?anchor_id=&anchor_hash=]`: `{ok, first_bad_event_id,
-  first_bad_override_id, head}`. The anchor is a `head` seen earlier.
-- `GET /limits`: both columns of the spending limits.
-- `POST /replay {policy, since?}` (dashboard token): what a draft policy would
+  ordered by `event_id`. Viewer, approver or admin bearer credential is
+  required in the `Authorization` header. Do not put credentials in query
+  strings; browser streams use `fetch` with an Authorization header.
+- `GET /whoami`: any authenticated role. `GET /verify` and `GET /limits` stay
+  open so the ledger fingerprint can be checked outside the dashboard.
+- `POST /override {event_id, action: approve|deny}`: approver or admin
+  credential and a JSON body, or it gets 401 or 415. The dashboard takes the
+  approver credential from the `#token=` fragment; the agent never receives
+  it, and phone alerts never carry it. An approval goes through even past a
+  limit - the family is the override.
+- `POST /replay {policy, since?}` (approver or admin): what a draft policy would
   have changed in real history. New rules can say `@outcome("hold")`.
 - `POST /demo/run {scenario}`, `GET /demo/status` (guard started with
-  `--demo`, dashboard token): the video's scenarios. Only the requests are
-  scripted; the real guard decides.
+  `--demo`; approver or admin for run, viewer/approver/admin for status):
+  the video's scenarios. Only the requests are scripted; the real guard
+  decides.
 - `POST /inbound {session_id, source, content}` -> `{trusted, tainted, labels}`.
   Untrusted text taints that session, and the whole household for 6 hours.
 - `POST /outbound {session_id, recipient, channel, content}` ->
