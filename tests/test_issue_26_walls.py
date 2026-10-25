@@ -97,3 +97,52 @@ def test_sound_alikes_never_make_a_card_or_ssn():
     assert [[t.digits for t in run] for run in digit_runs("123 to 45 for 6789")] == [["123"], ["45"], ["6789"]]
     w = OutboundWall(SecretStore(), SessionStore())
     assert w.check("s", "x@example.com", "sms", "123 to 45 for 6789")["decision"] == "allow"
+
+
+# Benji's review of #52: other numbers sent between the pieces hid the code
+# ("427", "room 5", "193" read as "4275193").
+
+@pytest.mark.parametrize("pieces", [
+    ["427", "see you in room 5", "193"],
+    ["427", "call 614 555 0123", "193"],
+    ["four two seven", "room 5", "one nine three"],
+    ["427 and room 5", "193"],
+    ["193", "room 5", "427"],          # second half first
+    ["42", "1", "71", "2", "93"],
+])
+def test_other_numbers_between_the_pieces_do_not_hide_a_code(pieces):
+    w = _wall_with_code()
+    decisions = [w.check("s", "daughter@example.com", "sms", p)["decision"] for p in pieces]
+    assert decisions[-1] == "block"
+    assert "block" not in decisions[:-1]
+
+
+@pytest.mark.parametrize("pieces", [
+    # Sound-alikes plus skipping would spell 42 + 7 + 193 here.
+    ["I went to the store for two hours", "won the game at 7", "meet me at 4 to 5", "room 193"],
+    ["call 614 555 0123", "zip 43210", "order 88231 ships", "it costs 45.50"],
+    ["it ate for ten minutes", "too late", "room 412", "see you at 7"],
+])
+def test_a_longer_ordinary_conversation_after_a_code_still_goes_through(pieces):
+    w = _wall_with_code()
+    assert [w.check("s", "x@example.com", "sms", p)["decision"] for p in pieces] == ["allow"] * len(pieces)
+
+
+def test_many_small_numbers_stay_cheap_to_check():
+    import time
+    w = _wall_with_code("98765432")
+    start = time.perf_counter()
+    for i in range(30):
+        w.check("s", "x@example.com", "sms", " ".join(str((i + j) % 10) + " x" for j in range(12)))
+    assert time.perf_counter() - start < 2.0
+
+
+def test_pieces_are_caught_with_the_apis_stored_code_digests(tmp_path):
+    from walls.storage import WallStateStore
+    storage = WallStateStore(str(tmp_path / "walls.db"), b"k" * 32)
+    secrets = SecretStore(storage=storage)
+    secrets.record_code("427193")
+    w = OutboundWall(secrets, SessionStore(), contacts={"daughter@example.com"})
+    decisions = [w.check("s", "daughter@example.com", "sms", p)["decision"]
+                 for p in ["427", "see you in room 5", "193"]]
+    assert decisions == ["allow", "allow", "block"]

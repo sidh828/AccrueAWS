@@ -152,8 +152,7 @@ class SecretStore:
         return bool(self._storage) and self._stored_code_in(streams)
 
     def _stored_code_in(self, streams: list[str]) -> bool:
-        now = self._clock()
-        return any(self._storage.matches_active_code(stream, now, self._window) for stream in streams)
+        return self._storage.matches_active_code_in(streams, self._clock(), self._window)
 
     def _scan_vault(self, text: str) -> list[Finding]:
         out: list[Finding] = []

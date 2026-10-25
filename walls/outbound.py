@@ -17,6 +17,10 @@ from walls.secrets import Finding, SecretStore, luhn_valid
 # code with the ones before it is blocked - to anyone, known contacts included.
 PIECES_WINDOW_SECONDS = 3600
 PIECES_REMEMBERED = 6
+# Codes are 4-8 digits. Joining pieces stops past that, and past this many
+# candidates (the newest pieces are tried first), so no message is costly.
+MAX_CODE_DIGITS = 8
+MAX_CODE_CANDIDATES = 2000
 
 BLOCK_KINDS = {"received_code", "card_number", "ssn", "vault_secret"}
 REDACT_KINDS = {"routing_number", "account_number"}
@@ -46,8 +50,9 @@ class OutboundWall:
         self.contacts = {_norm(c) for c in (contacts or set())}
         self.on_alert = on_alert or (lambda event: None)
         self._sent_groups: dict[str, list[tuple[float, str]]] = {}  # session -> (time, digits)
-        # session -> (time, digits, digits with sound-alikes), one per message sent
-        self._sent_streams: dict[str, list[tuple[float, str, str]]] = {}
+        # session -> (time, pieces, pieces with sound-alikes), one per message sent;
+        # a piece is one run of digits ("427", "614 555 0123" -> "6145550123")
+        self._sent_pieces: dict[str, list[tuple[float, tuple[str, ...], tuple[str, ...]]]] = {}
         self._lock = threading.RLock()
 
     def add_contact(self, recipient: str) -> None:
@@ -92,7 +97,7 @@ class OutboundWall:
         else:
             sent_content = result.get("redacted_content", content)
             self._remember(session_id, self._card_groups(sent_content), now)
-            self._remember_stream(session_id, sent_content, now)
+            self._remember_pieces(session_id, sent_content, now)
         return result
 
     @staticmethod
@@ -142,36 +147,68 @@ class OutboundWall:
                     return True
         return False
 
-    def _remember_stream(self, session_id: str, content: str, now: float) -> None:
-        plain, heard = digit_stream(content), digit_stream(content, sound_alikes=True)
+    @staticmethod
+    def _pieces(content: str, sound_alikes: bool) -> tuple[str, ...]:
+        return tuple("".join(t.digits for t in run) for run in digit_runs(content, sound_alikes))
+
+    def _remember_pieces(self, session_id: str, content: str, now: float) -> None:
+        plain, heard = self._pieces(content, False), self._pieces(content, True)
         if not heard:
             return
         with self._lock:
-            sent = self._sent_streams.setdefault(session_id, [])
+            sent = self._sent_pieces.setdefault(session_id, [])
             sent.append((now, plain, heard))
             cutoff = now - PIECES_WINDOW_SECONDS
-            self._sent_streams[session_id] = [m for m in sent if m[0] >= cutoff][-PIECES_REMEMBERED:]
+            self._sent_pieces[session_id] = [m for m in sent if m[0] >= cutoff][-PIECES_REMEMBERED:]
 
     def _completes_a_received_code(self, session_id: str, content: str, now: float) -> bool:
-        """Whether this message, read after the session's recent messages,
-        spells a code it received: "427" then "193", in digits, number words
-        or sound-alikes, either way round. Any split counts, so this leans
+        """Whether this message, read with the session's recent messages,
+        spells a code it received: "427" then "193" in digits or number words,
+        even with other numbers sent in between or the halves swapped; or in
+        sound-alikes over messages in a row; either way round. This leans
         toward blocking, but only while a received code is live."""
-        plain, heard = digit_stream(content), digit_stream(content, sound_alikes=True)
-        if not heard:
+        current = (self._pieces(content, False), self._pieces(content, True))
+        if not current[1]:
             return False
         cutoff = now - PIECES_WINDOW_SECONDS
         with self._lock:
-            recent = [m for m in self._sent_streams.get(session_id, []) if m[0] >= cutoff]
+            recent = [m for m in self._sent_pieces.get(session_id, []) if m[0] >= cutoff]
+        if not recent:
+            return False
+        # Real digits and number words: any in-order choice of pieces, so
+        # other numbers sent in between can't hide a code.
+        candidates = _joins([piece for m in recent for piece in m[1]], current[0])
+        # Sound-alikes ("for", "to", "won") are common words, so read that way
+        # only whole messages in a row count; skipping would match ordinary chat.
+        heard_now = "".join(current[1])
         for k in range(1, len(recent) + 1):
-            before = recent[-k:]
-            joined = ("".join(m[1] for m in before) + plain, "".join(m[2] for m in before) + heard)
-            if self.secrets.contains_received_code([s for j in joined for s in (j, j[::-1]) if s]):
-                return True
-        return False
+            candidates.append("".join(p for m in recent[-k:] for p in m[2]) + heard_now)
+        candidates = [c for c in candidates if c]
+        return bool(candidates) and self.secrets.contains_received_code(
+            candidates + [c[::-1] for c in candidates])
 
     def _alert(self, session_id: str, recipient: str, result: dict) -> None:
         try:
             self.on_alert({"session_id": session_id, "recipient": recipient, **result})
         except Exception:
             pass  # an alert failure must never turn a block into an allow
+
+
+def _joins(earlier: list[str], now: tuple[str, ...]) -> list[str]:
+    """Every string made of an in-order choice of this message's pieces (at
+    least one) with an in-order choice of earlier pieces before it - or after
+    it, for a code sent second half first. Up to a code's length; the newest
+    earlier pieces are tried first."""
+    mine: set[str] = set()
+    for piece in now:
+        mine |= {e + piece for e in mine | {""} if len(e + piece) <= MAX_CODE_DIGITS}
+    out: set[str] = set()
+    for put_before in (True, False):
+        joined = set(mine)
+        for piece in reversed(earlier):
+            if len(joined) >= MAX_CODE_CANDIDATES:
+                break
+            joined |= {(piece + e if put_before else e + piece) for e in joined
+                       if len(piece + e) <= MAX_CODE_DIGITS}
+        out |= joined
+    return [e for e in out if len(e) >= 4]
