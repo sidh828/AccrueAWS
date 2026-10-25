@@ -18,6 +18,7 @@ other row ran with it.
 | **History is tamper-evident.** | Live, below | A plain edit is refused; with the lock removed, `/verify` names the row |
 | **Every rule is tested by behavior.** Delete each rule and see whether a test fails | `.venv/bin/python tests/mutate_policy.py` | 12 of 12 rules caught |
 | **The walls and caps hold against the attack suite** | `.venv/bin/python -m agent.attacks.attack_suite --real` | 18 attacks: 16 blocked, 2 capped (slow drip at $196, 50 at once at $200), nothing leaked |
+| **A received code can't leave in disguise.** In pieces across messages (even to a known contact), in sound-alike words ("for two seven won"), or reversed | `.venv/bin/pytest tests/test_issue_26_walls.py -q` | Every disguise blocked on the message that completes the code; ordinary chat after a code arrives still goes through |
 | **It's fast.** One decision, over HTTP, end to end | `.venv/bin/python -m guard.bench --requests 1000` | p50 8.3 ms, p95 9.6 ms, p99 10.0 ms over 1,000 decisions. With a token: p50 8.4 ms, p99 10.2 ms |
 
 ## Tamper, step by step

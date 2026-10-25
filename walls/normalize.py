@@ -1,8 +1,8 @@
 """Text normalisation shared by every wall check (and the Tier 2 disclosure caps).
 
 Goal: "4 2 7 1 9 3", "4-2-7-1-9-3", "four two seven one nine three",
-"double four two one nine three" and fullwidth "４２７１９３" all reduce to the same
-digit string, deterministically, so an exact-match secret check can't be dodged by
+"double four two one nine three", fullwidth "４２７１９３" and (for codes only)
+"for two seven won nine three" or the code reversed all reduce to the same digit string, deterministically, so an exact-match secret check can't be dodged by
 formatting. No AI, no fuzzy matching.
 
 Two views of a text:
@@ -23,6 +23,11 @@ NUMBER_WORDS = {
     "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
 }
 MULTIPLIERS = {"double": 2, "triple": 3}
+# Words that sound like digits: "for two seven won nine three". Only the
+# received-code check reads them, and always alongside the plain reading, so
+# a stray "to" can't hide a code and ordinary words never make a card or SSN.
+SOUND_ALIKES = {"won": "1", "to": "2", "too": "2", "tree": "3", "for": "4", "fore": "4",
+                "ate": "8", "nein": "9"}
 _TOKEN = re.compile(r"[^\W\d_]+|\d+")
 
 
@@ -38,12 +43,14 @@ def nfkc(text: str) -> str:
     return unicodedata.normalize("NFKC", text)
 
 
-def tokens(text: str) -> list[Token]:
+def tokens(text: str, sound_alikes: bool = False) -> list[Token]:
     text = nfkc(text)
     raw = [(m.group().lower(), m.start(), m.end()) for m in _TOKEN.finditer(text)]
 
     def digits_of(word: str) -> str | None:
-        return word if word.isdigit() else NUMBER_WORDS.get(word)
+        if word.isdigit():
+            return word
+        return NUMBER_WORDS.get(word) or (SOUND_ALIKES.get(word) if sound_alikes else None)
 
     out: list[Token] = []
     i = 0
@@ -59,8 +66,15 @@ def tokens(text: str) -> list[Token]:
     return out
 
 
-def digit_stream(text: str) -> str:
-    return "".join(t.digits for t in tokens(text) if t.digits)
+def digit_stream(text: str, sound_alikes: bool = False) -> str:
+    return "".join(t.digits for t in tokens(text, sound_alikes) if t.digits)
+
+
+def code_streams(text: str) -> list[str]:
+    """Every digit string a received code could be read from: plain, with
+    sound-alike words, and each of those reversed."""
+    plain, heard = digit_stream(text), digit_stream(text, sound_alikes=True)
+    return [s for s in dict.fromkeys((plain, heard, plain[::-1], heard[::-1])) if s]
 
 
 def digit_runs(text: str) -> list[list[Token]]:
