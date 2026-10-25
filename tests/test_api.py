@@ -478,3 +478,37 @@ def test_payment_history_is_the_dashboards_to_read(guard):
     # The record check and the limits stay public: no payment details.
     assert call(guard, "GET", "/verify", token="")[0] == 200
     assert call(guard, "GET", "/limits", token="")[0] == 200
+
+
+def test_the_guard_serves_the_built_react_dashboard(guard, tmp_path, monkeypatch):
+    """With dashboard/react-frontend/dist built, the guard's printed link
+    opens the React dashboard (no Node at demo time); the plain page moves
+    to /plain. Only files under dist/assets/ with a known type are served."""
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text('<div id="root"></div><script src="/assets/app.js"></script>')
+    (dist / "assets" / "app.js").write_text("console.log('react')")
+    (dist / "assets" / "notes.txt").write_text("not a dashboard file")
+    (tmp_path / "secret.js").write_text("outside dist")
+    monkeypatch.setattr(api, "REACT", dist)
+
+    def fetch(path):
+        host, port = guard["base"].removeprefix("http://").split(":")
+        conn = http.client.HTTPConnection(host, int(port), timeout=10)
+        conn.request("GET", path)
+        res = conn.getresponse()
+        result = res.status, res.getheader("Content-Type"), res.read()
+        conn.close()
+        return result
+
+    status, kind, body = fetch("/")
+    assert status == 200 and b'id="root"' in body and kind.startswith("text/html")
+    status, kind, body = fetch("/assets/app.js")
+    assert status == 200 and kind.startswith("text/javascript") and b"react" in body
+    for path in ["/assets/notes.txt", "/assets/../../secret.js", "/assets/%2e%2e/%2e%2e/secret.js",
+                 "/assets/missing.js", "/secret.js"]:
+        assert fetch(path)[0] == 404, path
+    assert b"app.js" in fetch("/plain")[2]  # the plain page is still there
+
+    monkeypatch.setattr(api, "REACT", tmp_path / "not-built")
+    assert b'id="root"' not in fetch("/")[2]  # no build: "/" is the plain page
