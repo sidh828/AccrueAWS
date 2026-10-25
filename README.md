@@ -34,13 +34,15 @@ cargo install cedar-policy-cli --version 4.12.0
 
 python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/pytest tests/ -q
+# Require Cedar-backed tests locally instead of allowing them to skip:
+ACCRUE_REQUIRE_CEDAR=1 .venv/bin/pytest tests/ -q
 
 # the original accrue demo: five $9,999 transfers against a $10,000
 # budget. The first is allowed, the rest are denied.
 .venv/bin/python -m guard.main
 
 # the live guard API (agent tools call /authorize, /inbound and /outbound;
-# the dashboard reads /events and approves through /override).
+# the dashboard reads /events and /stream, and approves through /override).
 # It prints the dashboard links. The agent should classify pay_bill as utility
 # or rent so the known-bill rule applies; plain "bill" is a general payment.
 # Keys, generated once and kept stable and
@@ -64,6 +66,10 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 #   A sub-agent narrows it (no key needed): python3 -m guard.tokens narrow TOKEN \
 #                              --agent giftcard-subagent --day 10000 --tools buy_gift_card
 # Generate each credential with: python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+# Example setup in a POSIX shell (keep these values in your secret manager):
+export ACCRUE_AGENT_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+export ACCRUE_VIEWER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+export ACCRUE_APPROVER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
 .venv/bin/python -m guard.api --db ledger.db
 # Startup prints separate dashboard links for approvers and viewers. The
 # dashboard sends credentials in Authorization headers, not URL query strings.

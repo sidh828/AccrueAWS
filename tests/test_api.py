@@ -529,7 +529,5 @@ def test_payment_history_requires_a_viewer_role(guard):
         assert conn.getresponse().status == expected, path
         conn.close()
 
-    assert call(guard, "GET", "/verify", token="")[0] == 401
-    assert call(guard, "GET", "/limits", token="")[0] == 401
-    assert call(guard, "GET", "/verify", token=VIEWER_TOKEN)[0] == 200
-    assert call(guard, "GET", "/limits", token=VIEWER_TOKEN)[0] == 200
+    assert call(guard, "GET", "/verify", token="")[0] == 200
+    assert call(guard, "GET", "/limits", token="")[0] == 200

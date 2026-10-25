@@ -34,6 +34,7 @@ from the stand-in to this without changing its data model:
   approvers can read; approvers can also call `/override`, `/replay` and
   `/demo/run`. Admins can access every data route. Static dashboard files are
   public so the browser can load before reading a token from its URL fragment.
+  `/verify` and `/limits` remain public as specified in the interface contract.
 
 - Rows are sent as payments, not ledger entries. The ledger never changes a
   row: approving a hold appends a row that resolves it. Sent as is, the
@@ -93,7 +94,6 @@ ROLE_PERMISSIONS = {
     ("GET", "/events"): frozenset({"viewer", "approver", "admin"}),
     ("GET", "/stream"): frozenset({"viewer", "approver", "admin"}),
     ("GET", "/limits"): frozenset({"viewer", "approver", "admin"}),
-    ("GET", "/verify"): frozenset({"viewer", "approver", "admin"}),
     ("GET", "/demo/status"): frozenset({"viewer", "approver", "admin"}),
     ("POST", "/authorize"): frozenset({"agent", "admin"}),
     ("POST", "/inbound"): frozenset({"agent", "admin"}),
@@ -103,6 +103,15 @@ ROLE_PERMISSIONS = {
     ("POST", "/demo/run"): frozenset({"approver", "admin"}),
 }
 REQUIRED_ROLES = frozenset({"agent", "viewer", "approver"})
+ROLE_ENV_VARS = {
+    "agent": "ACCRUE_AGENT_TOKEN",
+    "viewer": "ACCRUE_VIEWER_TOKEN",
+    "approver": "ACCRUE_APPROVER_TOKEN (or ACCRUE_DASHBOARD_TOKEN)",
+}
+TOKEN_GENERATION_COMMAND = (
+    "python3 -c 'import secrets; print(secrets.token_urlsafe(24))'"
+)
+PUBLIC_GET_ROUTES = frozenset({"/limits", "/verify"})
 
 # The /authorize fields passed through to authorize.authorize_payment.
 REQUIRED = ("person", "chain", "tool", "amount_cents", "payee", "category", "session_id")
@@ -278,9 +287,11 @@ class Handler(BaseHTTPRequestHandler):
             if not path.is_file():
                 return self._json(404, {"error": "the dashboard isn't here"})
             return self._send(200, path.read_bytes(), content_type)
-        role = self._authenticated_role("GET", url.path)
-        if role is None:
-            return
+        role = None
+        if url.path not in PUBLIC_GET_ROUTES:
+            role = self._authenticated_role("GET", url.path)
+            if role is None:
+                return
         if url.path == "/whoami":
             return self._json(200, {"role": role})
         if url.path == "/stream":
@@ -524,7 +535,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Headers",
+                         "Content-Type, Authorization, Last-Event-ID")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 
     def _json(self, code, data):
@@ -624,9 +636,13 @@ def _validated_role_tokens(role_tokens, legacy_approver_token=None):
     configured = {role: value for role, value in role_tokens.items() if value is not None}
     missing = REQUIRED_ROLES - configured.keys()
     if missing:
+        variables = ", ".join(ROLE_ENV_VARS[role] for role in sorted(missing))
         raise ValueError(
-            "configure distinct bearer credentials (at least 32 characters) for: "
-            + ", ".join(sorted(missing))
+            "missing required API credentials. Set "
+            + variables
+            + ". Generate each value with "
+            + TOKEN_GENERATION_COMMAND
+            + " (values must be unique and at least 32 characters)"
         )
     for role, value in configured.items():
         if not isinstance(value, str) or len(value) < MIN_TOKEN_LENGTH:

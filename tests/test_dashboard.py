@@ -122,7 +122,8 @@ def test_override_settles_a_held_payment_once(api):
 
 def test_stream_resumes_after_last_event_id_and_sends_changes_without_an_id(played):
     guard, url = played
-    request = urllib.request.Request(f"{url}/stream?token={TOKEN}", headers={"Last-Event-ID": "5"})
+    request = urllib.request.Request(f"{url}/stream", headers={
+        "Authorization": f"Bearer {TOKEN}", "Last-Event-ID": "5"})
     with urllib.request.urlopen(request, timeout=5) as res:
         assert [e["id"] for e in read_events(res, 2)] == ["6", "7"]
         guard.override(6, "approve")
@@ -134,7 +135,8 @@ def test_stream_resumes_after_last_event_id_and_sends_changes_without_an_id(play
 
 def test_a_malformed_last_event_id_replays_from_the_start(api):
     # "²" passes str.isdigit() but int() rejects it.
-    request = urllib.request.Request(f"{api}/stream?token={TOKEN}", headers={"Last-Event-ID": "²"})
+    request = urllib.request.Request(f"{api}/stream", headers={
+        "Authorization": f"Bearer {TOKEN}", "Last-Event-ID": "²"})
     with urllib.request.urlopen(request, timeout=5) as res:
         assert read_events(res, 1)[0]["id"] == "1"
 
@@ -197,10 +199,13 @@ def test_an_oversized_override_body_is_refused_unread(api):
 
 def test_live_streams_are_capped():
     with serve(fake_api.FakeGuard(), max_streams=1) as url:
-        with urllib.request.urlopen(f"{url}/stream?token={TOKEN}", timeout=5) as first:
+        headers = {"Authorization": f"Bearer {TOKEN}"}
+        with urllib.request.urlopen(urllib.request.Request(
+                f"{url}/stream", headers=headers), timeout=5) as first:
             first.readline()  # the first stream is open and holds the only slot
             with pytest.raises(urllib.error.HTTPError) as err:
-                urllib.request.urlopen(f"{url}/stream?token={TOKEN}", timeout=5)
+                urllib.request.urlopen(urllib.request.Request(
+                    f"{url}/stream", headers=headers), timeout=5)
             assert err.value.code == 503
             err.value.close()
 
@@ -304,6 +309,10 @@ def test_payment_history_needs_the_token_on_the_stand_in_too(api):
         assert err.value.code == 401
         err.value.close()
     assert get(f"{api}/events?since=0")  # with the dashboard's token
+    with pytest.raises(urllib.error.HTTPError) as err:
+        urllib.request.urlopen(f"{api}/stream?token={TOKEN}", timeout=5)
+    assert err.value.code == 401
+    err.value.close()
 
 
 def test_a_watcher_without_the_token_reads_nothing(played, capsys):

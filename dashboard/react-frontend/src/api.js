@@ -47,6 +47,38 @@ async function getSnapshot() {
   return rows;
 }
 
+async function readEventStream(lastEventId, onEvent, onConnected, signal) {
+  const response = await fetch(`${API}/stream`, {
+    cache: 'no-store',
+    headers: { ...authHeaders(), 'Last-Event-ID': String(lastEventId) },
+    signal,
+  });
+  if (response.status === 401) throw new Error(NEEDS_LINK);
+  if (!response.ok) throw new Error(`Live updates unavailable (HTTP ${response.status})`);
+  if (!response.body) throw new Error('Live updates are not supported by this browser');
+  onConnected();
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    let boundary;
+    while ((boundary = buffer.search(/\r?\n\r?\n/)) !== -1) {
+      const separator = buffer.slice(boundary).match(/^\r?\n\r?\n/)[0];
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + separator.length);
+      const data = block.split(/\r?\n/)
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).replace(/^ /, ''))
+        .join('\n');
+      if (data) onEvent(JSON.parse(data));
+    }
+    if (done) return;
+  }
+}
+
 // Full snapshots expose updates to older IDs, such as a decision resolving a hold.
 export function useGuardEvents() {
   const [rowsById, setRowsById] = useState({});
@@ -74,13 +106,10 @@ export function useGuardEvents() {
 
   useEffect(() => {
     alive.current = true;
-    let pollingTimer = null;
-    let pollBusy = false;
     let disposed = false;
+    const controller = new AbortController();
 
     async function pollOnce() {
-      if (pollBusy || disposed) return;
-      pollBusy = true;
       try {
         await refresh();
         if (!disposed) setConnection('polling');
@@ -89,12 +118,11 @@ export function useGuardEvents() {
           setConnection('offline');
           if (reason.message === NEEDS_LINK) setError(NEEDS_LINK);
         }
-      } finally {
-        pollBusy = false;
       }
     }
 
     async function start() {
+      let lastEventId = 0;
       try {
         const identityResponse = await fetch(`${API}/whoami`, {
           cache: 'no-store',
@@ -110,16 +138,38 @@ export function useGuardEvents() {
           currentRole = (await identityResponse.json()).role;
         }
         if (!disposed) setRole(currentRole);
-        await pollOnce();
+        const snapshot = await refresh();
+        lastEventId = snapshot.reduce(
+          (maxId, event) => Math.max(maxId, event.event_id), 0
+        );
       } catch (reason) {
         if (!disposed) {
           setError(reason.message || 'Dashboard access failed');
           setConnection('offline');
         }
+        return;
       }
-      if (disposed) return;
-      setConnection('polling');
-      pollingTimer = window.setInterval(pollOnce, 1800);
+
+      while (!disposed) {
+        try {
+          await readEventStream(
+            lastEventId,
+            (event) => {
+              mergeEvent(event);
+              lastEventId = Math.max(lastEventId, event.event_id);
+            },
+            () => { if (!disposed) setConnection('live'); },
+            controller.signal,
+          );
+          if (!disposed) throw new Error('Live connection closed');
+        } catch (reason) {
+          if (disposed || reason.name === 'AbortError') return;
+          if (reason.message === NEEDS_LINK) setError(NEEDS_LINK);
+          setConnection('polling');
+          await pollOnce();
+          await new Promise((resolve) => window.setTimeout(resolve, 1800));
+        }
+      }
     }
 
     start();
@@ -130,9 +180,9 @@ export function useGuardEvents() {
     return () => {
       disposed = true;
       alive.current = false;
-      if (pollingTimer) window.clearInterval(pollingTimer);
+      controller.abort();
     };
-  }, [refresh]);
+  }, [refresh, mergeEvent]);
 
   async function override(event, action) {
     if (!['approver', 'admin'].includes(role) || event.status !== 'held' || busyId !== null) return;
