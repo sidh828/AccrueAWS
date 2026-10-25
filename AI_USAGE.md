@@ -520,3 +520,54 @@ his list from the completion diagnostic.
 **Not checked:** a phone tab opened from an alert, after opening the link once. Headless Firefox screenshots the page before its data arrives, so Siddh checks it on the phone.
 
 **Human decisions (Siddh's):** testing on Siddh's own phone and laptop, reporting the approval problem, and recording the video.
+
+## Sat Oct 24: Benji's agent, red team, and live-run checks (Benji, with Copilot)
+
+**Asked:** Benji asked Copilot to build the model-driven bill-pay agent and
+red-team runner, make their behavior testable without a live model, and
+review #52 before the live call. The follow-up was to run the model-only
+refusal test, the agent, and the ten-round red team.
+
+**What it did:**
+
+- Added `agent/agent.py`: incoming SMS goes through the guard first; the
+  model can request only guard-backed bill, gift-card, Zelle, and message
+  tools; there is no override tool; and each run stops after ten model
+  turns.
+- Added `agent/redteam.py`: seeded scam rounds report integer-cent amounts
+  asked for and allowed, and can write a JSON scoreboard.
+- Updated the refusal-test output to report its actual count, model, and
+  date. It does not supply a result when the live test has not run.
+- Reviewed #52 and found that a numeric message between two code pieces can
+  prevent the across-message matcher from detecting the completed code. A
+  request for changes was submitted, but GitHub shows the PR had already
+  merged before that review was recorded.
+
+**How we checked:**
+
+- Scripted model tests checked that the SMS reached the guard before the
+  model, each offered tool called the guard, and no override was available.
+- The local test run had 203 passing tests and 222 Cedar-dependent tests
+  skipped. PR #51's CI, which includes Cedar, passed.
+- The live-run prerequisites were checked without printing credentials.
+  No `ANTHROPIC_API_KEY`, Anthropic SDK, agent-role token, `.env`, or
+  running guard was available. The refusal command stopped because the API
+  key was absent; the agent stopped because the optional SDK was absent;
+  the red team stopped because the agent token was absent. No live model
+  run, refusal number, or scoreboard was produced.
+- No live refusal result or red-team score was inferred from scripted tests.
+
+**Rejected or changed:**
+
+- Treating scripted tests as evidence that a live model would attempt the
+  scam was rejected; only a live run can establish that.
+- Fabricating a refusal count or a safe red-team result was rejected.
+- Approval of #52 was withheld after the numeric-interlude gap was found;
+  the PR merged before the request-changes review was submitted.
+
+**Human decisions (Benji):**
+
+- Asked for the implementation and review, then asked to attempt the live
+  checks.
+- Left the live results unreported rather than inventing numbers when the
+  required local credentials and guard were unavailable.
