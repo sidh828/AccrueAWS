@@ -119,13 +119,11 @@ class WallStateStore:
             )
 
     def matches_active_code(self, digit_stream: str, now: float, window: int) -> bool:
-        candidates = {
-            self._digest(digit_stream[start : start + length])
-            for length in range(4, 9)
-            for start in range(max(0, len(digit_stream) - length + 1))
-        }
-        if not candidates:
-            return False
+        return self.matches_active_code_in([digit_stream], now, window)
+
+    def matches_active_code_in(self, digit_streams: list[str], now: float, window: int) -> bool:
+        """Whether any 4-8 digit stretch of any of these streams is a code
+        received in the window. One query, and no hashing when none is live."""
         with self._connect() as conn:
             conn.execute(
                 "DELETE FROM wall_received_codes WHERE recorded_at <= ?",
@@ -136,7 +134,15 @@ class WallStateStore:
                 (now - window,),
             ).fetchall()
         active = {row[0] for row in rows}
-        return not candidates.isdisjoint(active)
+        if not active:
+            return False
+        stretches = {
+            stream[start : start + length]
+            for stream in digit_streams
+            for length in range(4, 9)
+            for start in range(max(0, len(stream) - length + 1))
+        }
+        return any(self._digest(stretch) in active for stretch in stretches)
 
     def _digest(self, code: str) -> str:
         self._validate_code(code)

@@ -77,10 +77,10 @@ def code_streams(text: str) -> list[str]:
     return [s for s in dict.fromkeys((plain, heard, plain[::-1], heard[::-1])) if s]
 
 
-def digit_runs(text: str) -> list[list[Token]]:
+def digit_runs(text: str, sound_alikes: bool = False) -> list[list[Token]]:
     runs: list[list[Token]] = []
     cur: list[Token] = []
-    for t in tokens(text):
+    for t in tokens(text, sound_alikes):
         if t.digits:
             cur.append(t)
         elif cur:
