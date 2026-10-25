@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from walls.normalize import digit_runs, digit_stream, nfkc
+from walls.normalize import code_streams, digit_runs, nfkc
 from walls.storage import WallStateStore
 
 CODE_WINDOW_SECONDS = 3600  # remember received codes for one hour
@@ -132,17 +132,28 @@ class SecretStore:
         (spaces, hyphens, number words, filler letters, fullwidth digits). A code hiding
         inside a longer number is also caught: we lean toward blocking."""
         out: list[Finding] = []
-        stream = digit_stream(text)
+        streams = code_streams(text)
         for code in self.active_codes():
             pat = re.compile(r"(?<!\d)" + re.escape(code) + r"(?!\d)")
             hits = list(pat.finditer(text))
             if hits:
                 out += [Finding("received_code", m.start(), m.end()) for m in hits]
-            elif code in stream:
+            elif any(code in stream for stream in streams):
                 out.append(Finding("received_code", 0, len(text), label="obfuscated"))
-        if self._storage and self._storage.matches_active_code(stream, self._clock(), self._window):
+        if self._storage and self._stored_code_in(streams):
             out.append(Finding("received_code", 0, len(text), label="obfuscated"))
         return out
+
+    def contains_received_code(self, streams: list[str]) -> bool:
+        """Whether any of these digit strings contains a code received in the
+        last hour - for a code spread over several messages."""
+        if any(code in stream for code in self.active_codes() for stream in streams):
+            return True
+        return bool(self._storage) and self._stored_code_in(streams)
+
+    def _stored_code_in(self, streams: list[str]) -> bool:
+        now = self._clock()
+        return any(self._storage.matches_active_code(stream, now, self._window) for stream in streams)
 
     def _scan_vault(self, text: str) -> list[Finding]:
         out: list[Finding] = []

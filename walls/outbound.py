@@ -9,12 +9,12 @@ import threading
 from typing import Callable
 
 from walls.inbound import SessionStore
-from walls.normalize import digit_runs
+from walls.normalize import digit_runs, digit_stream
 from walls.secrets import Finding, SecretStore, luhn_valid
 
-# A card number sent in pieces: digit groups sent from one session in this
-# window are remembered, and a message whose groups complete a card number
-# with the ones before it is blocked - to anyone, known contacts included.
+# A card number or received code sent in pieces: what one session sent in
+# this window is remembered, and a message that completes a card number or a
+# code with the ones before it is blocked - to anyone, known contacts included.
 PIECES_WINDOW_SECONDS = 3600
 PIECES_REMEMBERED = 6
 
@@ -46,6 +46,8 @@ class OutboundWall:
         self.contacts = {_norm(c) for c in (contacts or set())}
         self.on_alert = on_alert or (lambda event: None)
         self._sent_groups: dict[str, list[tuple[float, str]]] = {}  # session -> (time, digits)
+        # session -> (time, digits, digits with sound-alikes), one per message sent
+        self._sent_streams: dict[str, list[tuple[float, str, str]]] = {}
         self._lock = threading.RLock()
 
     def add_contact(self, recipient: str) -> None:
@@ -71,7 +73,7 @@ class OutboundWall:
         groups = self._card_groups(content)
         if self._completes_a_card(session_id, groups, now):
             findings.append(Finding("card_number", 0, len(content), label="across messages"))
-        if self._completes_a_received_code(session_id, groups, now):
+        if self._completes_a_received_code(session_id, content, now):
             findings.append(Finding("received_code", 0, len(content), label="across messages"))
         kinds = {f.kind for f in findings}
         decision = "allow"
@@ -90,6 +92,7 @@ class OutboundWall:
         else:
             sent_content = result.get("redacted_content", content)
             self._remember(session_id, self._card_groups(sent_content), now)
+            self._remember_stream(session_id, sent_content, now)
         return result
 
     @staticmethod
@@ -139,22 +142,32 @@ class OutboundWall:
                     return True
         return False
 
-    def _completes_a_received_code(self, session_id: str, groups: list[str], now: float) -> bool:
-        """Detect a received code completed by whole digit groups across messages."""
-        if not groups:
+    def _remember_stream(self, session_id: str, content: str, now: float) -> None:
+        plain, heard = digit_stream(content), digit_stream(content, sound_alikes=True)
+        if not heard:
+            return
+        with self._lock:
+            sent = self._sent_streams.setdefault(session_id, [])
+            sent.append((now, plain, heard))
+            cutoff = now - PIECES_WINDOW_SECONDS
+            self._sent_streams[session_id] = [m for m in sent if m[0] >= cutoff][-PIECES_REMEMBERED:]
+
+    def _completes_a_received_code(self, session_id: str, content: str, now: float) -> bool:
+        """Whether this message, read after the session's recent messages,
+        spells a code it received: "427" then "193", in digits, number words
+        or sound-alikes, either way round. Any split counts, so this leans
+        toward blocking, but only while a received code is live."""
+        plain, heard = digit_stream(content), digit_stream(content, sound_alikes=True)
+        if not heard:
             return False
-        recent = self._recent(session_id, now)
-        sequence = recent + groups
-        previous_count = len(recent)
-        for end in range(previous_count, len(sequence)):
-            digits = ""
-            for start in range(end, -1, -1):
-                digits = sequence[start] + digits
-                if len(digits) > 8:
-                    break
-                if start < previous_count and len(digits) >= 4:
-                    if any(f.kind == "received_code" for f in self.secrets.scan(digits)):
-                        return True
+        cutoff = now - PIECES_WINDOW_SECONDS
+        with self._lock:
+            recent = [m for m in self._sent_streams.get(session_id, []) if m[0] >= cutoff]
+        for k in range(1, len(recent) + 1):
+            before = recent[-k:]
+            joined = ("".join(m[1] for m in before) + plain, "".join(m[2] for m in before) + heard)
+            if self.secrets.contains_received_code([s for j in joined for s in (j, j[::-1]) if s]):
+                return True
         return False
 
     def _alert(self, session_id: str, recipient: str, result: dict) -> None:
