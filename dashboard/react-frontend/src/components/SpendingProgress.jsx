@@ -1,5 +1,5 @@
 import { AlertTriangle, ArrowUpRight, CheckCircle2 } from 'lucide-react';
-import { asPercent, explanationForEvent, money } from '../format.js';
+import { asPercent, countsTowardLimit, explanationForEvent, money } from '../format.js';
 
 export default function SpendingProgress({ summary, limits }) {
   const { spent, allowed, stopped } = summary;
@@ -33,7 +33,7 @@ export default function SpendingProgress({ summary, limits }) {
       </div>
 
       <div className="spend-track" role="progressbar" aria-label="Actual spending" aria-valuenow={spent} aria-valuemin={0} aria-valuemax={limit}>
-        {allowed.filter((event) => !event.known_bill).map((event, i) => (
+        {allowed.filter(countsTowardLimit).map((event, i) => (
           <div key={event.event_id} className={`spend-segment seg-tone-${i % 4}`}
             style={{ width: `${asPercent(event.amount_cents, limit)}%` }}
             title={`${event.payee}: ${money(event.amount_cents)} actually spent`} />

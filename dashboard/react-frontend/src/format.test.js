@@ -60,3 +60,14 @@ test('the proof panel reads /verify in plain words', () => {
   assert.match(proofFrom({ ok: false, first_bad_event_id: null, first_bad_override_id: 2 }).detail, /Approval record #2/);
   for (const view of [ok, broken]) assert.doesNotMatch(`${view.title} ${view.detail}`, /ledger|hash|cedar/i);
 });
+
+test('a payment the family approved does not count toward the limit, like the guard', () => {
+  const now = Date.parse('2026-10-25T01:00:00Z');
+  const ts = new Date(now - 3600_000).toISOString();
+  const result = summarize([
+    { event_id: 1, ts, status: 'allowed', amount_cents: 5000, category: 'gift_card', resolved_by: null },
+    { event_id: 2, ts, status: 'allowed', amount_cents: 48000, category: 'home_repair', resolved_by: 9 },
+  ], now);
+  assert.equal(result.spent, 5000);
+  assert.equal(result.familyApproved, 48000);
+});
