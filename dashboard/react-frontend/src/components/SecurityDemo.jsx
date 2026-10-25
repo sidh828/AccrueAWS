@@ -126,7 +126,7 @@ export default function SecurityDemo({events = [], onRunScenario, demoBusy, canR
               Launch a simulated payment sequence and watch Accrue respond.
             </p>
           </div>
-          <span className="scenario-mode">Scripted demo</span>
+          <span className="scenario-mode">Live guard decisions</span>
         </div>
 
         <div className="scenario-grid">
@@ -158,9 +158,10 @@ export default function SecurityDemo({events = [], onRunScenario, demoBusy, canR
         )}
 
         <p className="scenario-note">
-          Each scenario adds transactions to the current demonstration.
-          Restart the Python simulator to clear the history.
-          Outcomes are scripted, not calculated by the real guard.
+          Each scenario sends predefined payment requests through Accrue's
+          real security guard. The guard evaluates spending history and
+          security rules to determine whether each payment is allowed,
+          stopped, or held for family approval.
         </p>
       </section>
 
