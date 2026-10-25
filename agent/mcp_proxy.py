@@ -17,7 +17,12 @@ claude_desktop_config.json:
         "args": ["-m", "agent.mcp_proxy"],
         "cwd": "/path/to/AccrueAWS",
         "env": {"ACCRUE_API": "http://127.0.0.1:8000",
-                "ACCRUE_AGENT_TOKEN": "<minted token>"}}}}
+                "ACCRUE_DELEGATION_TOKEN": "<python -m guard.tokens mint ...>"}}}}
+
+ACCRUE_DELEGATION_TOKEN is the signed delegation from guard.tokens, sent in
+the request body as "token". It's a different thing from the agent's login
+(ACCRUE_AGENT_TOKEN in #37's role logins, which HttpGuard sends as a header),
+so the two get separate names.
 
 The MCP protocol is newline-delimited JSON-RPC 2.0 on stdin/stdout, written
 out by hand here (initialize, tools/list, tools/call, ping) so the demo
@@ -180,7 +185,7 @@ def main():
         sys.exit("accrue proxy: refusing to start with ACCRUE_DASHBOARD_TOKEN in the "
                  "environment; remove it from the Claude Desktop config")
     api = os.environ.get("ACCRUE_API", "http://127.0.0.1:8000")
-    tools = ToolBox(HttpGuard(api), token=os.environ.get("ACCRUE_AGENT_TOKEN") or None,
+    tools = ToolBox(HttpGuard(api), token=os.environ.get("ACCRUE_DELEGATION_TOKEN") or None,
                     origin="mcp")
     print(f"accrue proxy: asking the guard at {api}", file=sys.stderr, flush=True)
     serve(Proxy(tools))
