@@ -9,6 +9,7 @@ const API = new URLSearchParams(location.search).get("api") || "";
 
 // The guard doesn't send its limits (they aren't in the contract), so these
 // copy the normal column of the spending rules in CLAUDE.md.
+// Replaced by the guard's own numbers from GET /limits when it answers.
 const LIMITS = { day: 50000, gift_card_day: 10000 };
 
 // The guard counts spending over a rolling 24 hours (BUDGET_WINDOW in
@@ -72,6 +73,16 @@ function forgetToken() {
 }
 
 // ---- data ---------------------------------------------------------------
+
+async function loadLimits() {
+  try {
+    const res = await fetch(`${API}/limits`);
+    const normal = res.ok ? (await res.json()).normal : null;
+    if (normal && Number.isSafeInteger(normal.day)) LIMITS.day = normal.day;
+    if (normal && Number.isSafeInteger(normal.gift_card_day)) LIMITS.gift_card_day = normal.gift_card_day;
+    draw();
+  } catch {} // keep the plan's numbers
+}
 
 function connect() {
   const headers = token ? { Authorization: `Bearer ${token}` } : {};
@@ -224,6 +235,8 @@ function render() {
   const all = [...rows.values()].sort((a, b) => a.event_id - b.event_id);
   const last24 = all.filter(recent);
   const allowed = last24.filter((r) => r.status === "allowed");
+  // The guard's running total leaves out known bills and family-approved payments.
+  const counted = allowed.filter((r) => !r.known_bill && r.resolved_by == null);
   const stopped = last24.filter((r) => r.status === "released");
   // A held payment waits for the family however long that takes, so unlike
   // the running total it isn't limited to the last 24 hours.
@@ -234,12 +247,12 @@ function render() {
   banner.textContent = "Payments are paused after repeated blocked attempts. Nothing goes through until you OK it.";
 
   document.getElementById("headline").textContent =
-    `${money(total(allowed))} of ${money(LIMITS.day)} spent in the last 24 hours`;
+    `${money(total(counted))} of ${money(LIMITS.day)} spent in the last 24 hours`;
   document.getElementById("sub").textContent = stopped.length
     ? `Stopped ${stopped.length} ${stopped.length === 1 ? "payment" : "payments"} worth ${money(total(stopped))}`
     : "Nothing stopped in the last 24 hours";
 
-  renderBar([...allowed, ...waiting.filter(recent), ...stopped]);
+  renderBar([...counted, ...waiting.filter(recent), ...stopped]);
   renderNeedsOk(waiting);
   renderMeters(allowed);
   document.getElementById("timeline").replaceChildren(...last24.reverse().map(timelineItem));
@@ -320,4 +333,5 @@ function timelineItem(r) {
 }
 
 draw();
+loadLimits();
 connect();
