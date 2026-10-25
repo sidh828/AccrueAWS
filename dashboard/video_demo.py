@@ -12,8 +12,10 @@ then plays the beats in VIDEO.md. The guard decides every payment: only
 the requests are scripted.
 
 Tokens: it uses ACCRUE_AGENT_TOKEN, ACCRUE_VIEWER_TOKEN and
-ACCRUE_APPROVER_TOKEN from the environment, or makes up new ones (and then
-the dashboard link changes every run).
+ACCRUE_APPROVER_TOKEN from the environment. Any that aren't set are made up
+once and kept in .video-tokens.json (not in git), so the dashboard link stays
+the same from take to take, and a phone that opened it once keeps working.
+The guard wants each at least 32 characters, all different.
 """
 
 import argparse
@@ -32,6 +34,35 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 ROLES = ("ACCRUE_AGENT_TOKEN", "ACCRUE_VIEWER_TOKEN", "ACCRUE_APPROVER_TOKEN")
+TOKENS_FILE = ROOT / ".video-tokens.json"
+MIN_TOKEN = 32  # guard/api.py's MIN_TOKEN_LENGTH
+
+
+def load_tokens():
+    """{"agent": ..., "viewer": ..., "approver": ...}: the environment's,
+    else the saved ones, else new ones (saved). Exits with a plain message
+    if they're too short or not all different."""
+    try:
+        saved = json.loads(TOKENS_FILE.read_text())
+    except (OSError, ValueError):
+        saved = {}
+    tokens, made = {}, False
+    for name in ROLES:
+        role = name.split("_")[1].lower()
+        tokens[role] = os.environ.get(name) or saved.get(role)
+        if not tokens[role]:
+            tokens[role], made = secrets.token_urlsafe(32), True
+    if made:  # keep made-up tokens for the next take
+        TOKENS_FILE.write_text(json.dumps({**saved, **tokens}))
+        TOKENS_FILE.chmod(0o600)
+    short = [f"ACCRUE_{r.upper()}_TOKEN" for r, t in tokens.items() if len(t) < MIN_TOKEN]
+    if short:
+        sys.exit(f"{', '.join(short)} must be at least {MIN_TOKEN} characters. Unset it to let "
+                 "this make one up, or make one with:\n"
+                 "  python3 -c 'import secrets; print(secrets.token_urlsafe(32))'")
+    if len(set(tokens.values())) < len(tokens):
+        sys.exit("The agent, viewer and approver tokens must all be different.")
+    return tokens
 CODE = "427913"  # the verification code the scammer asks for
 
 
@@ -183,20 +214,22 @@ def main(argv=None):
                         help="play beat 3 through the proxy here instead of in Claude Desktop")
     parser.add_argument("--ip", help="this laptop's Wi-Fi address for the phone's link "
                         "(found automatically; set it if it picks a VPN address)")
+    parser.add_argument("--then-exit", action="store_true",
+                        help="with --auto, stop the guard after the last beat")
     parser.add_argument("--only", help="comma-separated beat numbers to play, e.g. 1,2,7")
     args = parser.parse_args(argv)
 
-    tokens = {}
-    for name in ROLES:
-        tokens[name.split("_")[1].lower()] = os.environ.get(name) or secrets.token_urlsafe(32)
-    args.db = str(Path(tempfile.mkdtemp(prefix="accrue-video-")) / "demo.db")
+    tokens = load_tokens()
+    workdir = Path(tempfile.mkdtemp(prefix="accrue-video-"))
+    args.db = str(workdir / "demo.db")
+    guard_log = open(workdir / "guard.log", "w")
     env = {**os.environ, "ACCRUE_PEOPLE": "mom",
            **{name: tokens[name.split("_")[1].lower()] for name in ROLES}}
     env.pop("ACCRUE_DASHBOARD_TOKEN", None)
     children = [subprocess.Popen(
         [sys.executable, "-m", "guard.api", "--db", args.db, "--demo",
          "--host", "0.0.0.0", "--port", str(args.port)],
-        cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)]
+        cwd=ROOT, env=env, stdout=guard_log, stderr=subprocess.STDOUT)]
     guard = Guard(args.port, tokens)
     try:
         for _ in range(100):
@@ -206,7 +239,10 @@ def main(argv=None):
             except OSError:
                 time.sleep(0.2)
         else:
-            sys.exit("the guard didn't start; is something else on the port?")
+            guard_log.flush()
+            sys.exit("the guard didn't start. Its last words:\n"
+                     + "".join(open(workdir / "guard.log").readlines()[-5:])
+                     + f"(is something else using port {args.port}?)")
 
         ip = args.ip or lan_ip()
         print(f"\nDashboard (projector and phone): http://{ip}:{args.port}/#token={tokens['approver']}\n")
@@ -233,6 +269,10 @@ def main(argv=None):
             action(guard, args)
         if args.auto is None:
             input("\nDone. Enter (or Ctrl-C) stops the guard. ")
+        elif not args.then_exit:
+            print("\nDone. The guard keeps running for the camera; Ctrl-C stops it.")
+            while True:
+                time.sleep(3600)
     except KeyboardInterrupt:
         pass
     finally:
