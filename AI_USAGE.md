@@ -433,3 +433,69 @@ Benji merged #11 to #14, and Siddh merged #15.
 - setting up ntfy and testing the alerts on Siddh's own phone;
 - which PRs to merge, and merging the AI_USAGE.md PRs;
 - the demo laptop setup at 9:15.
+
+## Sat Oct 24, 9:00 PM to 9:50 PM: final checks, run commands after the role logins, and the last wall gaps (Dharvik, with Claude Code)
+
+**Asked:** Dharvik asked Claude Code (Claude Opus 5.5) to check `main` after
+each round of merges, then to "complete all this", meaning everything on
+his list from the completion diagnostic.
+
+**What it did:**
+
+- **The 9 PM check of `main`:** the full suite, the real-guard attack
+  suite, all four demo scenarios on a fresh guard, and `/verify`.
+- **#44:** found that #40 had merged without its numbers commit, and
+  added it back.
+- **After #37's role logins landed,** reran the check with the three
+  logins and probed each role:
+  - a missing login gets 401
+  - viewer and agent each get 403 on the other's routes
+  - only the approver can approve
+- **#47:** fixed the two run instructions #37 broke:
+  - `CLAUDE.md`'s demo command no longer started the guard
+  - the Claude Desktop config had no agent login, so every payment was
+    held as "the guard couldn't check it"
+- **#52, in Benji's walls at Dharvik's request,** closed the two disclosed
+  gaps:
+  - **A received code sent in pieces.** "427", then "193", to a known
+    contact went through twice on `main`. The second piece is now blocked.
+  - **Codes in sound-alike words or reversed** ("for two seven won nine
+    three", "391724") are now blocked too.
+- **The team plan page,** kept in step with what landed: the three logins,
+  the proxy's config, the breaker scene, and the known limits.
+
+**How we checked:**
+
+- After #37 and #48: 417 tests passed with Cedar required. With #52: 442.
+- The attack suite on the real guard: nothing leaked.
+- #52's gap was shown live through the API, failing on `main` and blocked
+  with the fix, using the stored, keyed code digests.
+- Each run instruction in #47 was tried against a guard running the role
+  logins, before and after the change.
+
+**Mistakes, and what caught them:**
+
+- **A test for #52 expected "4111 for 1111 to 1111 for 1111" to be
+  allowed.** It's a real-shaped card with words between the groups, which
+  #33 blocks on purpose, and it was blocked before the change too. The
+  test was wrong, not the wall, and was replaced by a direct check that
+  sound-alikes never join card or SSN digits.
+- **A probe script's content-type header was malformed** (zsh doesn't
+  split an unquoted variable), so the first role-login demo run returned
+  "the body must be JSON". It was rerun with the header written out.
+
+**Rejected or changed:**
+
+- **Reading sound-alikes as digits everywhere:** rejected. "to" and "for"
+  between numbers would make false cards and SSNs. Only the
+  received-code check reads them, alongside the plain reading.
+- **The live-model runs** (the refusal test, the real agent, the red team)
+  weren't run: this machine has no API key.
+
+**Human decisions (Dharvik):**
+
+- "complete all this", including the fix in Benji's folder, with Benji
+  reviewing
+- merging #44, #45 and #47 after review. The #44 and #47 merges were run
+  by Claude on Dharvik's instruction, each pinned to the commit CI had
+  passed
