@@ -312,3 +312,27 @@ def test_a_watcher_without_the_token_reads_nothing(played, capsys):
     alerts.Watcher(url, deliver=lambda alert: sent.append(alert) or True, replay=True).step(now=0)
     assert sent == []
     assert "401" in capsys.readouterr().out
+
+
+def test_paying_someone_new_sends_an_early_warning():
+    row = {"status": "allowed", "tool": "send_zelle", "amount_cents": 15000,
+           "payee": "zelle:new-contact", "rule": None}
+    assert alerts.alert_for({**row, "notice": None}) is None   # a plain payment: nothing
+    assert alerts.alert_for({**row, "notice": "something_else"}) is None
+    new = alerts.alert_for({**row, "notice": "new_payee"})
+    assert new == {"title": "Paid someone new", "priority": 2, "message":
+                   "Went through: a first payment to someone new. $150 Zelle payment to zelle:new-contact."}
+    recent = alerts.alert_for({**row, "notice": "recent_payee"})
+    assert recent["title"] == "Paid someone new" and "first paid recently" in recent["message"]
+    # A held or stopped payment keeps its own alert, whatever the notice.
+    assert alerts.alert_for({**row, "status": "held", "notice": "new_payee"})["title"] == "Needs your OK"
+
+
+def test_a_summary_counts_early_warnings_separately():
+    held = {"title": "Needs your OK", "message": "", "priority": 4}
+    stopped = {"title": "Stopped", "message": "", "priority": 3}
+    paid_new = {"title": "Paid someone new", "message": "", "priority": 2}
+    assert alerts.summary([held, stopped, stopped, paid_new])["message"].startswith(
+        "1 payment waiting for your OK and 2 payments stopped and 1 payment paid to someone new.")
+    only_new = alerts.summary([paid_new] * 4)
+    assert (only_new["title"], only_new["priority"]) == ("Paid someone new", 2)
