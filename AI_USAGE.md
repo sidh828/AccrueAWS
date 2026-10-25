@@ -277,3 +277,118 @@ reviewed and merged #2.
 - "do all of it" for landing, end to end and `explain.py`
 
 Benji merged #11 to #14, and Siddh merged #15.
+
+## Sat Oct 24, 3:30 PM to 9:00 PM: guard Tier 2, a hostile review, and the proof (Dharvik, with Claude Code)
+
+**Asked:** Dharvik asked Claude Code (Claude Opus 5.5), one step at a time:
+- the Tier 2 guard work: guarantee tests, delegation tokens, policy replay
+- "review brutally, scrutinize everything", then benchmark and push
+- fix what's in `guard/`, and write up the rest for each owner
+- close #26's gaps in walls/ (Benji's folder, with Benji reviewing)
+- a plan for the team from 8 PM to submission, then "blaze through" his part of it
+
+**What it did:**
+
+- **#21, the guarantees, checked after the fact.** `tests/guarantees.py`
+  reads a whole ledger and lists every allowed payment that broke a rule.
+  The property, concurrency and chaos tests all end with it.
+- **#22, signed delegation tokens.** A sub-agent's budget and tools can
+  only shrink. **#23, policy replay:** what a draft rule would have done to
+  real history.
+- **#24:** fixed `main`'s red CI (the 60-at-once test hit the lock timeout
+  on a slow runner).
+- **A hostile review at 4:30 PM.** It attacked the guarantees directly and
+  ran every finding. **#25** fixes the guard's holes:
+  - the same known bill paid ten times: $1,200 allowed. It now counts once
+    a cycle
+  - "$1 to verify, then $450" to a new payee: allowed. It's now a hold, and
+    $0 payments are refused
+  - a scam text in one chat, then paying from another: allowed. It now
+    taints the whole household for 6 hours
+  - "person": "mom2", or "mоm" with a Cyrillic о: a fresh $500 a day. Fixed
+    with the `ACCRUE_PEOPLE` allowlist
+  - the React demo replayed decisions typed into a script. The guard now
+    serves `/demo/run` and decides each request
+
+  The findings in other folders went on issue #26, with owners and repros,
+  instead of into their code.
+- **#29, a payout outbox.** Money moves at most once per payment, even when
+  an agent retries a request.
+- **#30, CLAUDE.md's contract** brought up to date with `main` (it needed
+  everyone's OK; Benji merged it).
+- **#32 and #33, in Benji's walls at Dharvik's request:** a card number
+  sent one group at a time, or with words between the groups, and SSNs
+  with dots or no separators, are now blocked. Ordinary numbers (rooms,
+  zips, phones, prices) still go through.
+- **#38:** `.env` kept out of git before anyone wrote an API key into it.
+- **#40 and #44, a writer queue and `EVIDENCE.md`.** A storm test found
+  that 600 requests at once left 308 timed out on the database lock. They
+  were held, so nothing went over the cap, but real payments got stuck.
+  Decisions now queue before SQLite's lock: 1,000 at once land exactly on
+  $500, with none timing out. `EVIDENCE.md` lists every claim with its
+  command and tonight's result.
+- **Reviews:**
+  - #36 (the guard serves the React build) and #39 (Claude Desktop through
+    an MCP proxy): each run live before approving
+  - #43 (React CI): checked its action pin is the official release
+  - #37 (role-based logins): changes requested
+- **A team plan page for 8 PM to submission:** owners, commands, the demo
+  run sheet, judge Q&A and what to cut.
+
+**How we checked:**
+
+- The suite went 240 → 395 passing, with the real Cedar CLI.
+- 10,000 random households × 40 steps (about 400,000 decisions): 0
+  guarantees broken.
+- The concurrency and chaos tests passed 20 runs out of 20.
+- Mutation: each of the 12 spending rules was deleted in turn, and a
+  behavioral test failed every time.
+- The attack suite on the real guard: 18 attacks, 16 blocked, 2 capped,
+  nothing leaked.
+- Latency over HTTP, measured: p50 8.3 ms, p99 10.0 ms.
+- At 9:05 PM, on a clean `main`: all four demo scenarios were run on a
+  fresh guard, and `/verify` said `ok: true`. A hand edit was refused, and
+  once the lock was dropped, `/verify` named the edited row.
+
+**Mistakes, and what caught them:**
+
+- **#32's first card check** ran Luhn alone, which about 1 in 10 ordinary
+  numbers pass. Its own test of ordinary numbers caught it, and a card now
+  also needs a card's shape (15 or 16 digits, starting 2 to 6). The next
+  version missed the attack because labels like "group 1" broke the
+  sequence. Now only 4- to 6-digit groups count.
+- **#33's first fix** still let "4111 1111 and 1111 1111" through: the two
+  groups merged into one 8-digit run. A test caught it.
+- **The first mutation run** counted the two delegation rules as caught
+  only because a structural test failed. That test is left out now, and
+  both are caught by token tests.
+- **#40 merged without its last commit.** GitHub's PR page lagged behind
+  the branch, so it merged with placeholders where the numbers should be.
+  The 9 PM check of `main`'s own files caught it, and #44 adds the
+  numbers back.
+- **The plan page described the `held_bill` scene wrongly** (a bill rule,
+  not the breaker). The demo run caught it, and the page was corrected.
+
+**Rejected or changed:**
+
+- **An AI writer for explanations:** still not wired. `/events` builds
+  explanations on every read, so it would need a cache, and it couldn't be
+  tested against a real model tonight. It must never run inside the locked
+  transaction.
+- **Loosening the storm test** to accept lock timeouts as "fail closed":
+  rejected. The cause was fixed instead.
+- **#37's role-based logins tonight:** changes requested. The real guard's
+  attack suite got 401s, and it changes the frozen contract after the
+  freeze.
+- **Claude merging its own PRs unreviewed:** blocked by its permissions.
+  A teammate merged #38.
+
+**Human decisions (Dharvik):**
+
+- run the hostile review, and fix only `guard/` while writing up the rest
+  on #26
+- have Claude fix #26's wall items in Benji's folder, with Benji reviewing
+- the dotted-SSN tests
+- the plan's scope for the last stretch
+- reviewing and merging #40, and the merges of #27, #28, #31, #36 and #41
+  after review
