@@ -244,9 +244,14 @@ The guard for the live demo (it serves the plain dashboard and prints its
 links; the React app's dev proxy points at it):
 
 ```bash
-ACCRUE_PEOPLE=mom ACCRUE_LEDGER_KEY=... ACCRUE_WALL_KEY=... ACCRUE_DASHBOARD_TOKEN=... \
+ACCRUE_PEOPLE=mom ACCRUE_LEDGER_KEY=... ACCRUE_WALL_KEY=... \
+ACCRUE_AGENT_TOKEN=... ACCRUE_VIEWER_TOKEN=... ACCRUE_APPROVER_TOKEN=... \
   .venv/bin/python -m guard.api --db ledger.db --demo
 ```
+
+The three logins are required, unique and at least 32 characters each
+(`python3 -c 'import secrets; print(secrets.token_urlsafe(24))'`). The agent's
+process (and Claude Desktop's MCP config) gets only `ACCRUE_AGENT_TOKEN`.
 
 Without `ACCRUE_PEOPLE` (or `ACCRUE_REQUIRE_TOKENS=1` with `ACCRUE_TOKEN_KEY`),
 any "person" is accepted and each new one gets a fresh budget.

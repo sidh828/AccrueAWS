@@ -17,7 +17,11 @@ claude_desktop_config.json:
         "args": ["-m", "agent.mcp_proxy"],
         "cwd": "/path/to/AccrueAWS",
         "env": {"ACCRUE_API": "http://127.0.0.1:8000",
+                "ACCRUE_AGENT_TOKEN": "<the guard's ACCRUE_AGENT_TOKEN>",
                 "ACCRUE_DELEGATION_TOKEN": "<python -m guard.tokens mint ...>"}}}}
+
+Without ACCRUE_AGENT_TOKEN the guard answers 401, so every payment comes back
+"the guard couldn't check it" (held, fail closed).
 
 ACCRUE_DELEGATION_TOKEN is the signed delegation from guard.tokens, sent in
 the request body as "token". It's a different thing from the agent's login
