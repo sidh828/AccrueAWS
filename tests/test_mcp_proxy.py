@@ -97,11 +97,14 @@ def test_a_failure_inside_is_not_paid():
     assert text.startswith("Not paid yet") and "couldn't check" in text
 
 
-def test_it_refuses_to_start_holding_the_dashboard_token():
-    env = {**os.environ, "ACCRUE_DASHBOARD_TOKEN": "x"}
+@pytest.mark.parametrize("credential", mcp_proxy.FAMILY_CREDENTIALS)
+def test_it_refuses_to_start_holding_a_family_credential(credential):
+    env = {k: v for k, v in os.environ.items() if k not in mcp_proxy.FAMILY_CREDENTIALS}
+    env[credential] = "x" * 32
     proc = subprocess.run([sys.executable, "-m", "agent.mcp_proxy"], input="", env=env,
                           capture_output=True, text=True, timeout=30)
     assert proc.returncode != 0 and "refusing to start" in proc.stderr
+    assert credential in proc.stderr
 
 
 @pytest.mark.cedar
@@ -117,7 +120,7 @@ def test_claude_desktop_through_the_proxy_is_stopped_and_the_dashboard_sees_it(t
     )
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
-    env = {k: v for k, v in os.environ.items() if k != "ACCRUE_DASHBOARD_TOKEN"}
+    env = {k: v for k, v in os.environ.items() if k not in mcp_proxy.FAMILY_CREDENTIALS}
     env["ACCRUE_API"] = base
     env["ACCRUE_AGENT_TOKEN"] = AGENT_TOKEN
     messages = [
@@ -160,7 +163,8 @@ def test_the_delegation_token_has_its_own_name(monkeypatch):
 
     monkeypatch.setattr(mcp_proxy, "ToolBox", Recorder)
     monkeypatch.setattr(mcp_proxy, "serve", lambda proxy: None)
-    monkeypatch.delenv("ACCRUE_DASHBOARD_TOKEN", raising=False)
+    for name in mcp_proxy.FAMILY_CREDENTIALS:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ACCRUE_AGENT_TOKEN", "the-agents-login")
     monkeypatch.setenv("ACCRUE_DELEGATION_TOKEN", "the-signed-delegation")
     mcp_proxy.main()

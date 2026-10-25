@@ -40,6 +40,11 @@ import sys
 from agent.tools import HttpGuard, ToolBox
 
 SERVER = {"name": "accrue-guard", "version": "0.1.0"}
+
+# The family's credentials (guard/api.py roles). The proxy only ever needs
+# ACCRUE_AGENT_TOKEN; holding any of these, it refuses to start.
+FAMILY_CREDENTIALS = ("ACCRUE_DASHBOARD_TOKEN", "ACCRUE_APPROVER_TOKEN",
+                      "ACCRUE_ADMIN_TOKEN", "ACCRUE_VIEWER_TOKEN")
 PROTOCOL = "2025-06-18"
 
 _AMOUNT = {"type": "integer", "minimum": 1,
@@ -184,9 +189,11 @@ def serve(proxy, stdin=sys.stdin, stdout=sys.stdout):
 
 
 def main():
-    if os.environ.get("ACCRUE_DASHBOARD_TOKEN"):
-        # The agent side must never hold the credential that approves payments.
-        sys.exit("accrue proxy: refusing to start with ACCRUE_DASHBOARD_TOKEN in the "
+    held = [name for name in FAMILY_CREDENTIALS if os.environ.get(name)]
+    if held:
+        # The agent side must never hold a credential that approves payments
+        # or reads the family's history.
+        sys.exit(f"accrue proxy: refusing to start with {', '.join(held)} in the "
                  "environment; remove it from the Claude Desktop config")
     api = os.environ.get("ACCRUE_API", "http://127.0.0.1:8000")
     tools = ToolBox(HttpGuard(api), token=os.environ.get("ACCRUE_DELEGATION_TOKEN") or None,
