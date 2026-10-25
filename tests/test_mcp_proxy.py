@@ -146,3 +146,22 @@ def test_claude_desktop_through_the_proxy_is_stopped_and_the_dashboard_sees_it(t
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_the_delegation_token_has_its_own_name(monkeypatch):
+    """ACCRUE_AGENT_TOKEN is the agent's login in #37's role logins, sent as a
+    header; the delegation (guard.tokens) rides in the body. One value can't
+    be both, so the proxy reads the delegation from ACCRUE_DELEGATION_TOKEN."""
+    seen = {}
+
+    class Recorder:
+        def __init__(self, guard, token=None, origin=None, **kw):
+            seen["token"], seen["origin"] = token, origin
+
+    monkeypatch.setattr(mcp_proxy, "ToolBox", Recorder)
+    monkeypatch.setattr(mcp_proxy, "serve", lambda proxy: None)
+    monkeypatch.delenv("ACCRUE_DASHBOARD_TOKEN", raising=False)
+    monkeypatch.setenv("ACCRUE_AGENT_TOKEN", "the-agents-login")
+    monkeypatch.setenv("ACCRUE_DELEGATION_TOKEN", "the-signed-delegation")
+    mcp_proxy.main()
+    assert seen == {"token": "the-signed-delegation", "origin": "mcp"}
