@@ -21,7 +21,7 @@ const SCENARIOS = [
   {
     id: "held_bill",
     title: "Paused payment",
-    description: "A $180 plumber bill requiring approval",
+    description: "A $480 plumber bill requiring approval",
     icon: "◷",
   },
 ];
@@ -58,6 +58,17 @@ export default function SecurityDemo({events = [], onRunScenario, demoBusy, canR
   const allEvents = [...events].sort(
     (a, b) => a.event_id - b.event_id
   );
+  const totalStopped = allEvents.filter(
+    (r) => r.status === "released"
+  ).length;
+
+  const totalHeld = allEvents.filter(
+    (r) => r.status === "held"
+  ).length;
+
+  const totalPending = allEvents.filter(
+    (r) => r.status === "pending"
+  ).length;
   const requests = events
     .filter(
       (event) =>
@@ -186,9 +197,9 @@ export default function SecurityDemo({events = [], onRunScenario, demoBusy, canR
 
         <div className="demo-stat">
           <span>Protection results</span>
-          <strong>{stopped.length} stopped</strong>
+          <strong>{totalStopped} stopped</strong>
           <small>
-            {held.length} waiting · {pending.length} processing
+            {totalHeld} waiting · {totalPending} processing
           </small>
         </div>
       </div>
