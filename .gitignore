@@ -4,6 +4,8 @@ __pycache__/
 .venv/
 .coverage
 htmlcov/
+*.db-shm
+*.db-wal
 
 # Keys for the demo (ACCRUE_*, ANTHROPIC_API_KEY, NTFY_TOPIC). Never commit them.
 .env

@@ -57,6 +57,9 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 #   A sub-agent narrows it (no key needed): python3 -m guard.tokens narrow TOKEN \
 #                              --agent giftcard-subagent --day 10000 --tools buy_gift_card
 # Generate a key with: python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+# Build the React dashboard once (Node >= 22.12); the guard then serves it at
+# its printed link, and the plain page at /plain. No Node needed afterwards.
+(cd dashboard/react-frontend && npm ci && npm run build)
 .venv/bin/python -m guard.api --db ledger.db
 # Password-vault entries are still in memory and must be loaded at startup.
 
