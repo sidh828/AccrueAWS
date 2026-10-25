@@ -392,3 +392,44 @@ Benji merged #11 to #14, and Siddh merged #15.
 - the plan's scope for the last stretch
 - reviewing and merging #40, and the merges of #27, #28, #31, #36 and #41
   after review
+
+## Sat Oct 24, 12:45 PM to 9:15 PM: dashboard, phone alerts, the MCP proxy, and reviews (Siddh, with Claude Code)
+
+**Asked:** Siddh asked Claude Code (Claude Opus 5.5) to take Siddh's to-dos from Dharvik's guard review and the 8 PM plan, test while working, put every change in a PR, and review teammates' PRs. Siddh also had it run Shipwright agents (a researcher and a code reviewer), with a limit on usage.
+
+**What it did:**
+
+- **The guard review's three to-dos for Siddh:**
+  - #9: `/override` needs the dashboard's token, and plain-text cross-site posts are refused.
+  - #6: CI caches the Cedar build (re-runs dropped from about 105 s to 8–14 s), reports coverage, and has a `cedar` marker. CI fails, rather than skips, when Cedar is missing.
+  - #27: the React dashboard reads its limits from `GET /limits`.
+- **The React dashboard against the real guard (#27):** it had been built against the stand-in API. Its proxy pointed at the wrong port, it counted the calendar day and known bills, and held payments vanished at midnight. It showed $170 spent where the guard counted $50.
+- #5: the plain dashboard uses the guard's rolling 24 hours.
+- #28: a live proof panel. It checks `/verify` and turns red, naming the row, when a record is edited by hand.
+- #34: payment history needs the dashboard's token.
+- #36: the guard serves the built React dashboard at its printed link.
+- **The 8 PM plan:**
+  - #39: `agent/mcp_proxy.py`, so Claude Desktop pays through the guard.
+  - #41: "Paid someone new" phone alerts.
+  - #42 and #48: token names and roles after #37.
+- **Reviews, each with the code run, not just read:**
+  - #2: approved, with a measured note that 200 requests at once got `database is locked`. #40 later fixed it with a writer queue.
+  - #16 and #37: changes requested. #16's stand-in counted known bills. #37's CI failed only on the Cedar tests its author's laptop skipped.
+- **Phone alerts set up with Siddh:** ntfy on Siddh's phone, the guard, and the watcher, debugged until every alert type arrived.
+
+**How we checked:**
+- Tests for every change, and for each fix a check that the new tests fail on the old code.
+- Each feature run against a real guard: the four demo scenarios, the proxy started as Claude Desktop starts it, the alert watcher.
+- The React pages rendered in headless Firefox and looked at, both with and without the token, and with hostile rows (a tool named `constructor`, null fields).
+- Each claim in a PR came from a run, not from reading the code.
+
+**Rejected or cut:**
+- Siddh stopped the two Shipwright research agents and the first PR reviewer partway to save usage; none of their results were used.
+- Shipwright's task-store workflow (plan-session, dev-task) wasn't available on this machine, so it wasn't used.
+- A cookie for the dashboard token was rejected in favor of a bearer header. A cookie set when the page loads would go to anything that can fetch the page, including an agent.
+
+**Human decisions (Siddh's):**
+- which review findings to fix, and when to stop for the 6 PM gate;
+- setting up ntfy and testing the alerts on Siddh's own phone;
+- which PRs to merge, and merging the AI_USAGE.md PRs;
+- the demo laptop setup at 9:15.
