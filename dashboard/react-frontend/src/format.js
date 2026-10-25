@@ -76,6 +76,8 @@ export function isRecent(ts, now = Date.now()) {
   return !Number.isNaN(t) && now - t < WINDOW_MS;
 }
 
+export const countsTowardLimit = (event) => !event.known_bill && event.resolved_by == null;
+
 export function summarize(events, now = Date.now()) {
   // `today` keeps its name for the components, but means the last 24 hours.
   const today = events.filter((event) => isRecent(event.ts, now));
@@ -91,9 +93,11 @@ export function summarize(events, now = Date.now()) {
     waiting,
     processing,
     stopped,
-    // Known bills (rent, utilities) don't count toward the guard's running total.
-    spent: sum(allowed.filter((event) => !event.known_bill)),
+    // The guard's running total leaves out known bills (rent, utilities) and
+    // payments the family approved (resolved_by set): guard/authorize.py.
+    spent: sum(allowed.filter(countsTowardLimit)),
     knownBills: sum(allowed.filter((event) => event.known_bill)),
+    familyApproved: sum(allowed.filter((event) => event.resolved_by != null)),
     giftCardSpent: sum(allowed.filter((event) => event.category === 'gift_card')),
     // "Stopped attempted value" isn't money saved; repeated attempts may target the same dollars.
     stoppedAttempts: stopped.length,
