@@ -499,3 +499,24 @@ his list from the completion diagnostic.
 - merging #44, #45 and #47 after review. The #44 and #47 merges were run
   by Claude on Dharvik's instruction, each pinned to the commit CI had
   passed
+
+## Sat Oct 24, 9:15 PM to 10:10 PM: the video runner, phone approvals, and the day total (Siddh, with Claude Code)
+
+**Asked:** Siddh asked Claude Code (Claude Opus 5.5) to check the PRs and issues, to do Siddh's part of the 8 PM plan and of #26 and #57, and to help with the video. Siddh then reported that approvals didn't work from the phone.
+
+**What it did:**
+
+- **#48:** after #37's role logins, the alert watcher reads with the viewer token, and the MCP proxy refuses to start if it holds any family token.
+- **#50:** the video. `VIDEO.md` is a shot list in which every outcome came from a rehearsal against the real guard. `dashboard/video_demo.py` plays one beat per key press on a fresh guard. It corrected four things in the plan's shot list: the scenario order, why the plumber's bill is held, where the secrets beat shows, and the cut red-team beat.
+- **#56, phone approvals:** reproduced in a sandbox.
+  - The dashboard kept its token per tab, and an alert tap opens a new tab without it, so that tab had no Approve buttons. The token is now kept per device.
+  - The runner made up new tokens every take; it now reuses them.
+  - A 12-character token stopped the guard from starting, and the runner blamed the port. It now says which token is too short.
+- **#58 (#26 item 2):** the dashboards counted family-approved payments, which the guard leaves out. Approving the $480 plumber's bill in beat 5 would have shown $530, past the $500 line, while the guard counted $50. The plain page also reads its limits from `/limits` now.
+- Status of all five `dashboard/` items posted on #26.
+
+**How we checked:** tests for each change, including one that plays every video beat against a real guard. Sandbox runs of the runner: the approver link's token gets role "approver", approving the plumber's bill returns "allowed", and after approval the dashboard's count is $50.00.
+
+**Not checked:** a phone tab opened from an alert, after opening the link once. Headless Firefox screenshots the page before its data arrives, so Siddh checks it on the phone.
+
+**Human decisions (Siddh's):** testing on Siddh's own phone and laptop, reporting the approval problem, and recording the video.
