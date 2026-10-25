@@ -14,6 +14,9 @@ from agent import mcp_proxy
 from guard import api
 
 DASHBOARD_TOKEN = "proxy-test-dashboard-token"
+AGENT_TOKEN = "agent-" + "a" * 40
+VIEWER_TOKEN = "viewer-" + "v" * 40
+APPROVER_TOKEN = "approver-" + "p" * 40
 
 
 class FakeTools:
@@ -106,12 +109,17 @@ def test_claude_desktop_through_the_proxy_is_stopped_and_the_dashboard_sees_it(t
     """The plan's done-when: the proxy, started the way Claude Desktop starts
     it, asks the real guard; the gift card is not paid, and the payment
     shows on the dashboard's feed."""
-    server = api.make_server(str(tmp_path / "ledger.db"), DASHBOARD_TOKEN, port=0,
-                             wall_key=b"proxy-test-wall-key-" * 2)
+    server = api.make_server(
+        str(tmp_path / "ledger.db"), port=0,
+        role_tokens={"agent": AGENT_TOKEN, "viewer": VIEWER_TOKEN,
+                     "approver": APPROVER_TOKEN},
+        wall_key=b"proxy-test-wall-key-" * 2,
+    )
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
     env = {k: v for k, v in os.environ.items() if k != "ACCRUE_DASHBOARD_TOKEN"}
     env["ACCRUE_API"] = base
+    env["ACCRUE_AGENT_TOKEN"] = AGENT_TOKEN
     messages = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
@@ -130,7 +138,7 @@ def test_claude_desktop_through_the_proxy_is_stopped_and_the_dashboard_sees_it(t
         assert text.startswith(("Stopped", "Not paid yet")), text
 
         request = urllib.request.Request(base + "/events",
-                                         headers={"Authorization": f"Bearer {DASHBOARD_TOKEN}"})
+                                         headers={"Authorization": f"Bearer {VIEWER_TOKEN}"})
         with urllib.request.urlopen(request, timeout=10) as res:
             rows = json.loads(res.read())
         [row] = [r for r in rows if r["tool"] == "buy_gift_card"]
