@@ -180,8 +180,7 @@ def main():
         sys.exit("accrue proxy: refusing to start with ACCRUE_DASHBOARD_TOKEN in the "
                  "environment; remove it from the Claude Desktop config")
     api = os.environ.get("ACCRUE_API", "http://127.0.0.1:8000")
-    tools = ToolBox(HttpGuard(api), token=os.environ.get("ACCRUE_AGENT_TOKEN") or None,
-                    origin="mcp")
+    tools = ToolBox(HttpGuard(api), origin="mcp")
     print(f"accrue proxy: asking the guard at {api}", file=sys.stderr, flush=True)
     serve(Proxy(tools))
 
