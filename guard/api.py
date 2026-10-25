@@ -81,9 +81,38 @@ from . import authorize, ledger, replay, tokens
 DASHBOARD = Path(__file__).parent.parent / "dashboard"
 STATIC = {
     "/": ("index.html", "text/html; charset=utf-8"),
+    "/plain": ("index.html", "text/html; charset=utf-8"),
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
 }
+
+# The React dashboard, once built (cd dashboard/react-frontend && npm ci &&
+# npm run build). When it's there it takes "/", so the guard's printed link
+# opens it with no Node running at demo time; the plain page stays at /plain.
+REACT = DASHBOARD / "react-frontend" / "dist"
+REACT_TYPES = {
+    ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
+    ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2",
+}
+
+
+def react_file(url_path):
+    """The built React dashboard's file for a request path, or None.
+
+    "/" and "/index.html" are its page; anything else has to be a file
+    under dist/assets/ with a known type, and resolving it can't step
+    outside dist/ (no "..")."""
+    root = REACT.resolve()
+    if not (root / "index.html").is_file():
+        return None
+    if url_path in ("/", "/index.html"):
+        return root / "index.html"
+    if not url_path.startswith("/assets/"):
+        return None
+    path = (root / url_path.lstrip("/")).resolve()
+    if root / "assets" not in path.parents or path.suffix not in REACT_TYPES or not path.is_file():
+        return None
+    return path
 MAX_BODY = 64_000  # bytes; /authorize is a few hundred, a /replay draft a whole policy
 MAX_STREAMS = 50  # live /stream connections at once
 TIMEOUT = 30  # seconds before a stalled connection is dropped
@@ -281,6 +310,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         url = urlparse(self.path)
         query = parse_qs(url.query)
+        react = react_file(url.path)
+        if react is not None:
+            content_type = REACT_TYPES.get(react.suffix, "text/html; charset=utf-8")
+            return self._send(200, react.read_bytes(), content_type)
         if url.path in STATIC:
             name, content_type = STATIC[url.path]
             path = DASHBOARD / name
@@ -688,6 +721,10 @@ def main(argv=None):
     print(f"guard API on {base}  (ledger: {args.db})")
     print(f"dashboard, can approve:  {base}#token={role_tokens['approver']}")
     print(f"dashboard, read-only:    {base}#token={role_tokens['viewer']}")
+    print("(open the appropriate link once on each device that needs dashboard access)")
+    if react_file("/") is None:
+        print("note: the React dashboard isn't built, so the links open the plain page. Build it:\n"
+              "  cd dashboard/react-frontend && npm ci && npm run build")
     if role_tokens.get("admin"):
         print("admin bearer credential configured; do not share it with the browser")
     if not os.environ.get("ACCRUE_LEDGER_KEY"):

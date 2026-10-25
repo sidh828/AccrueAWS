@@ -70,6 +70,9 @@ ACCRUE_REQUIRE_CEDAR=1 .venv/bin/pytest tests/ -q
 export ACCRUE_AGENT_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
 export ACCRUE_VIEWER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
 export ACCRUE_APPROVER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+# Build the React dashboard once (Node >= 22.12); the guard then serves it at
+# its printed link, and the plain page at /plain. No Node needed afterwards.
+(cd dashboard/react-frontend && npm ci && npm run build)
 .venv/bin/python -m guard.api --db ledger.db
 # Startup prints separate dashboard links for approvers and viewers. The
 # dashboard sends credentials in Authorization headers, not URL query strings.

@@ -33,6 +33,12 @@ RULES = {
     "breaker": "Paused: too many blocked attempts in a row",
 }
 TOOLS = {"pay_bill": "bill", "buy_gift_card": "gift card", "send_zelle": "Zelle payment"}
+# Early warnings on payments that went through: the guard's event rows carry
+# a "notice" when the payee is new (guard/ledger.py).
+NOTICES = {
+    "new_payee": "Went through: a first payment to someone new",
+    "recent_payee": "Went through: another payment to someone first paid recently",
+}
 MAX_SEPARATE = 3  # more alerts than this at once go out as one summary
 
 
@@ -52,15 +58,19 @@ def money(cents):
 def alert_for(row):
     """The phone alert for one event row, or None if it needs none. Copes
     with odd fields: tool and payee start out as whatever the agent sent."""
-    status = row.get("status")
-    if status not in ("released", "held"):
+    status, notice = row.get("status"), row.get("notice")
+    early_warning = status == "allowed" and isinstance(notice, str) and notice in NOTICES
+    if status not in ("released", "held") and not early_warning:
         return None
     tool, rule = row.get("tool"), row.get("rule")
     label = TOOLS.get(tool) if isinstance(tool, str) else None
     label = label or text(tool, "payment").replace("_", " ")
+    what = f"{money(row.get('amount_cents'))} {label} to {text(row.get('payee'), 'an unknown payee')}"
+    if early_warning:
+        # It went through, but money to someone new is how scams start.
+        return {"title": "Paid someone new", "message": f"{NOTICES[notice]}. {what}.", "priority": 2}
     why = (RULES.get(rule) if isinstance(rule, str) else None) or text(
         row.get("explanation"), "Waiting for your OK" if status == "held" else "Stopped by a spending rule")
-    what = f"{money(row.get('amount_cents'))} {label} to {text(row.get('payee'), 'an unknown payee')}"
     message = f"{why}. {what}."
     if status == "held":
         return {"title": "Needs your OK", "message": message, "priority": 4}
@@ -70,11 +80,13 @@ def alert_for(row):
 def summary(alerts):
     """One alert standing in for several."""
     held = sum(alert["title"] == "Needs your OK" for alert in alerts)
-    stopped = len(alerts) - held
+    paid_new = sum(alert["title"] == "Paid someone new" for alert in alerts)
+    stopped = len(alerts) - held - paid_new
     parts = [f"{n} {'payment' if n == 1 else 'payments'} {what}"
-             for n, what in ((held, "waiting for your OK"), (stopped, "stopped")) if n]
+             for n, what in ((held, "waiting for your OK"), (stopped, "stopped"),
+                             (paid_new, "paid to someone new")) if n]
     return {
-        "title": "Needs your OK" if held else "Stopped",
+        "title": "Needs your OK" if held else "Stopped" if stopped else "Paid someone new",
         "message": " and ".join(parts) + ". Open the dashboard to see them.",
         "priority": max(alert["priority"] for alert in alerts),
     }
