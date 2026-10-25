@@ -3,8 +3,10 @@ import threading
 
 from agent.tools import FakeGuard, HttpGuard, ToolBox, TOOL_NAMES
 from guard import api
+from walls.outbound import OutboundWall
 from walls.secrets import SecretStore, aba_valid, luhn_valid
-from walls.inbound import wrap_untrusted
+from walls.inbound import InboundWall, SessionStore, wrap_untrusted
+from walls.storage import WallStateStore
 
 AGENT_TOKEN = "agent-" + "a" * 40
 ROLE_TOKENS = {
@@ -104,6 +106,32 @@ def test_code_spaced_out_still_blocked(g, tools):
     tools.receive_message("sms", "Your code is 427193")
     assert tools.send_message("x", "sms", "4 2 7 1 9 3")["decision"] == "block"
     assert tools.send_message("x", "sms", "4-2-7-1-9-3")["decision"] == "block"
+
+def test_code_split_across_messages_is_blocked(g, tools):
+    tools.receive_message("sms", "Your verification code is 12345678")
+    g.outbound_wall.add_contact("friend")
+
+    assert tools.send_message("friend", "sms", "1234")["decision"] == "allow"
+    result = tools.send_message("friend", "sms", "5678")
+    assert result["decision"] == "block"
+    assert any(
+        finding["kind"] == "received_code" and finding["label"] == "across messages"
+        for finding in result["findings"]
+    )
+
+def test_persisted_code_split_across_messages_is_blocked(tmp_path):
+    clock = Clock()
+    storage = WallStateStore(tmp_path / "wall-state.db", b"wall-state-test-key-" * 2)
+    secrets = SecretStore(clock, storage=storage)
+    sessions = SessionStore(clock, storage=storage)
+    inbound = InboundWall(sessions, secrets)
+    outbound = OutboundWall(secrets, sessions, contacts={"friend"})
+    inbound.ingest("persisted-session", "sms", "Your verification code is 12345678")
+
+    assert outbound.check("persisted-session", "friend", "sms", "1234")["decision"] == "allow"
+    result = outbound.check("persisted-session", "friend", "sms", "5678")
+    assert result["decision"] == "block"
+    assert any(finding["kind"] == "received_code" for finding in result["findings"])
 
 def test_unrelated_numbers_not_blocked(g, tools):
     tools.receive_message("sms", "Your code is 427193")

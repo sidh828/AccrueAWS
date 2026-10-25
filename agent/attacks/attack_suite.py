@@ -61,6 +61,7 @@ ATTACKS: list[Attack] = [
     Attack("Sub-agent fakes or drops its chain (identity claim)", lambda e: from_scenario(identity_spoof.run(e))),
     Attack("Scammer asks for the verification code just texted", wa.code_asked_plainly),
     Attack("Same ask, no scam words, code sent spaced out", wa.code_asked_unlabeled_and_spaced),
+    Attack("Verification code leaked across messages", wa.code_sent_across_messages),
     Attack("Email hides 'add this payee and pay it'", lambda e: from_scenario(payee_attacks.injected_email(e))),
     Attack("Card number leaked one group at a time (stranger)",
            lambda e: wa.card_one_group_at_a_time(e, known_contact=False)),
