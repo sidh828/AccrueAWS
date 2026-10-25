@@ -4,27 +4,37 @@ const API = import.meta.env.VITE_API_BASE || '';
 
 const TOKEN_STORAGE_KEY = 'accrue_dashboard_token';
 
-// The demo backend prints a URL containing #token=...
-// Read it from the URL without sending it in normal page requests.
+// The guard prints a URL containing #token=... Opening it once on a device
+// keeps the token on that device (localStorage), so a new tab, such as the
+// one a phone alert opens (alerts never carry the token), still works. It's
+// read from the URL fragment, which isn't sent in page requests, then taken
+// out of the address bar. A token the guard refuses is dropped (forgetToken).
+function stored(read) {
+  try { return read(); } catch { return null; } // storage can be blocked
+}
+
 function getDashboardToken() {
   const params = new URLSearchParams(window.location.hash.slice(1));
   const tokenFromUrl = params.get('token');
 
   if (tokenFromUrl) {
-    // Keep the token for this browser tab's session.
-    sessionStorage.setItem(TOKEN_STORAGE_KEY, tokenFromUrl);
-
-    // Remove the secret from the visible address bar.
+    stored(() => localStorage.setItem(TOKEN_STORAGE_KEY, tokenFromUrl));
     window.history.replaceState(
       window.history.state,
       '',
       window.location.pathname + window.location.search
     );
-
     return tokenFromUrl;
   }
 
-  return sessionStorage.getItem(TOKEN_STORAGE_KEY) || '';
+  return stored(() => localStorage.getItem(TOKEN_STORAGE_KEY))
+    || stored(() => sessionStorage.getItem(TOKEN_STORAGE_KEY))
+    || '';
+}
+
+export function forgetToken() {
+  stored(() => localStorage.removeItem(TOKEN_STORAGE_KEY));
+  stored(() => sessionStorage.removeItem(TOKEN_STORAGE_KEY));
 }
 
 const dashboardToken = getDashboardToken();
@@ -133,7 +143,12 @@ export function useGuardEvents() {
           currentRole = dashboardToken ? 'approver' : 'viewer';
         } else {
           if (!identityResponse.ok) {
-            throw new Error(`Dashboard access denied (HTTP ${identityResponse.status})`);
+            // A token from an earlier run of the guard: drop it, so the next
+            // open of the printed link starts clean.
+            if (identityResponse.status === 401) forgetToken();
+            throw new Error(identityResponse.status === 401
+              ? 'This screen needs the dashboard link the guard printed. Open it once on this device.'
+              : `Dashboard access denied (HTTP ${identityResponse.status})`);
           }
           currentRole = (await identityResponse.json()).role;
         }

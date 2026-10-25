@@ -21,8 +21,10 @@ def free_port():
 
 def test_every_beat_plays_as_the_shot_list_says():
     env = {k: v for k, v in os.environ.items() if not k.startswith(("ACCRUE_", "NTFY_"))}
+    env.update(ACCRUE_AGENT_TOKEN="a" * 40, ACCRUE_VIEWER_TOKEN="v" * 40,
+               ACCRUE_APPROVER_TOKEN="p" * 40)  # all given: nothing saved to disk
     out = subprocess.run(
-        [sys.executable, "dashboard/video_demo.py", "--auto", "0", "--simulate-desktop",
+        [sys.executable, "dashboard/video_demo.py", "--auto", "0", "--then-exit", "--simulate-desktop",
          "--port", str(free_port()), "--ip", "127.0.0.1"],
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=240).stdout
     for expected in [
@@ -36,3 +38,14 @@ def test_every_beat_plays_as_the_shot_list_says():
         "'ok': False, 'first_bad_event_id': 4",                   # 7: tamper names the row
     ]:
         assert expected in out, f"missing {expected!r} in:\n{out}"
+
+
+def test_a_short_token_is_explained_not_a_mystery():
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("ACCRUE_", "NTFY_"))}
+    env.update(ACCRUE_AGENT_TOKEN="a" * 40, ACCRUE_VIEWER_TOKEN="v" * 40,
+               ACCRUE_APPROVER_TOKEN="siddh-accrue")
+    proc = subprocess.run([sys.executable, "dashboard/video_demo.py", "--auto", "0", "--then-exit",
+                           "--port", str(free_port())], cwd=ROOT, env=env,
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode != 0
+    assert "ACCRUE_APPROVER_TOKEN must be at least 32 characters" in proc.stderr
