@@ -5,7 +5,7 @@ Follows the guard's GET /events and pushes every newly stopped or held
 payment to ntfy (https://ntfy.sh). The phone runs the ntfy app, subscribed
 to the same topic.
 
-    ACCRUE_DASHBOARD_TOKEN=<token> NTFY_TOPIC=<topic> python3 dashboard/alerts.py \
+    ACCRUE_VIEWER_TOKEN=<token> NTFY_TOPIC=<topic> python3 dashboard/alerts.py \
         --open http://<laptop-ip>:8000/
     python3 dashboard/alerts.py --dry-run      # print alerts, send nothing
 
@@ -199,7 +199,10 @@ def main(argv=None):
 
     try:
         Watcher(args.api, deliver, replay=args.replay,
-                token=os.environ.get("ACCRUE_DASHBOARD_TOKEN")).run()
+                # The viewer role reads payments but can't approve them; the
+                # old single dashboard token still works.
+                token=os.environ.get("ACCRUE_VIEWER_TOKEN")
+                or os.environ.get("ACCRUE_DASHBOARD_TOKEN")).run()
     except KeyboardInterrupt:
         pass
 

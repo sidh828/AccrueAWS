@@ -345,3 +345,24 @@ def test_a_summary_counts_early_warnings_separately():
         "1 payment waiting for your OK and 2 payments stopped and 1 payment paid to someone new.")
     only_new = alerts.summary([paid_new] * 4)
     assert (only_new["title"], only_new["priority"]) == ("Paid someone new", 2)
+
+
+def test_the_watcher_reads_with_the_viewer_token(monkeypatch):
+    """With role logins, the watcher only needs to read: it takes
+    ACCRUE_VIEWER_TOKEN, falling back to the old dashboard token."""
+    seen = []
+
+    class Recorder:
+        def __init__(self, api, deliver, replay=False, token=None):
+            seen.append(token)
+
+        def run(self):
+            pass
+
+    monkeypatch.setattr(alerts, "Watcher", Recorder)
+    monkeypatch.setenv("ACCRUE_VIEWER_TOKEN", "viewer-" + "v" * 32)
+    monkeypatch.setenv("ACCRUE_DASHBOARD_TOKEN", "approver-" + "a" * 32)
+    alerts.main(["--dry-run"])
+    monkeypatch.delenv("ACCRUE_VIEWER_TOKEN")
+    alerts.main(["--dry-run"])
+    assert seen == ["viewer-" + "v" * 32, "approver-" + "a" * 32]
