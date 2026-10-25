@@ -11,10 +11,13 @@ race — not Cedar's statelessness itself — is the actual loophole this file
 exists to close. See PRIMER.md §1.4.
 """
 
+import functools
 import json
 import os
+import sqlite3
 import subprocess
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -162,6 +165,29 @@ def _is_policy_id(text):
     return text.replace("_", "").replace("-", "").isalnum()
 
 
+# Writers in this process queue here before SQLite's lock. SQLite's own
+# wait is a busy loop with growing sleeps, so a burst of hundreds of
+# requests at once mostly sleeps through the lock being free and times
+# out; a lock here hands it straight to the next one in line. Past the
+# database's own timeout it's the same error as a locked database, which
+# the caller answers as a hold (fail closed). Other processes still meet
+# at SQLite's lock.
+_WRITERS = threading.RLock()
+
+
+def _one_writer_at_a_time(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not _WRITERS.acquire(timeout=ledger.BUSY_TIMEOUT_SECONDS):
+            raise sqlite3.OperationalError("database is locked")
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _WRITERS.release()
+    return wrapper
+
+
+@_one_writer_at_a_time
 def authorize_transfer(conn, session_id, resource, amount_cents, scope_id=None,
                        request_id=None, policy_path=None):
     """Ask "can this transfer happen?", accounting for everything this
@@ -431,6 +457,7 @@ def _decide(context, policy_path, outcomes=None):
     return "DENY", "unknown"
 
 
+@_one_writer_at_a_time
 def authorize_payment(conn, *, person, chain, tool, amount_cents, payee, category,
                       session_id, request_id=None, reason=None, tainted=False,
                       policy_path=None, now=None, delegation=None):
@@ -585,6 +612,7 @@ def authorize_payment(conn, *, person, chain, tool, amount_cents, payee, categor
         raise
 
 
+@_one_writer_at_a_time
 def resolve(conn, event_id, action, authorized_by, now=None):
     """The family settles a held payment: `action` is "approve" or "deny".
     Appends a row that resolves the held one and returns its event_id; the
