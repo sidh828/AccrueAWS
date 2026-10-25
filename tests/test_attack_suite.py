@@ -57,6 +57,11 @@ def test_some_attack_beats_the_label_wall_but_not_ours(table):
 def test_prompt_only_column_is_never_faked(table):
     assert all(c["prompt_only"].status == NOT_RUN for c in table.values())
 
+def test_code_split_across_messages_is_blocked_by_our_guard(table):
+    (row,) = [cells for name, cells in table.items()
+              if name == "Verification code leaked across messages"]
+    assert row["ours"].status == BLOCKED
+
 
 def test_unlabeled_scam_text_really_has_no_labels():
     assert deterministic_labels(U) == []

@@ -71,6 +71,8 @@ class OutboundWall:
         groups = self._card_groups(content)
         if self._completes_a_card(session_id, groups, now):
             findings.append(Finding("card_number", 0, len(content), label="across messages"))
+        if self._completes_a_received_code(session_id, groups, now):
+            findings.append(Finding("received_code", 0, len(content), label="across messages"))
         kinds = {f.kind for f in findings}
         decision = "allow"
         if kinds & REDACT_KINDS:
@@ -135,6 +137,24 @@ class OutboundWall:
                     break
                 if len(digits) in (15, 16) and digits[0] in "23456" and luhn_valid(digits):
                     return True
+        return False
+
+    def _completes_a_received_code(self, session_id: str, groups: list[str], now: float) -> bool:
+        """Detect a received code completed by whole digit groups across messages."""
+        if not groups:
+            return False
+        recent = self._recent(session_id, now)
+        sequence = recent + groups
+        previous_count = len(recent)
+        for end in range(previous_count, len(sequence)):
+            digits = ""
+            for start in range(end, -1, -1):
+                digits = sequence[start] + digits
+                if len(digits) > 8:
+                    break
+                if start < previous_count and len(digits) >= 4:
+                    if any(f.kind == "received_code" for f in self.secrets.scan(digits)):
+                        return True
         return False
 
     def _alert(self, session_id: str, recipient: str, result: dict) -> None:
